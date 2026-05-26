@@ -89,7 +89,30 @@ function makeKc(contextName) {
   return kc;
 }
 
-ipcMain.handle('k8s:listContexts', async () => {
+// Normalize errors from kube/exec-auth/network failures into a short human
+// string. Avoids printing multi-line aws/gcloud auth dumps.
+function friendlyErr(e) {
+  const raw = String(e?.message || e || 'unknown error');
+  const first = raw.split('\n').map(l => l.trim()).filter(Boolean)[0] || raw;
+  if (e?.code === 'EHOSTUNREACH') return `host unreachable: ${e.address}:${e.port}`;
+  if (e?.code === 'ENOTFOUND')    return `host not found: ${e.hostname || e.address}`;
+  if (e?.code === 'ETIMEDOUT')    return `connection timed out: ${e.address || ''}`;
+  if (e?.code === 'ECONNREFUSED') return `connection refused: ${e.address}:${e.port}`;
+  if (/session has expired/i.test(first)) return 'credentials expired — reauthenticate';
+  return first.replace(/^aws: \[ERROR\]:\s*/i, '').slice(0, 240);
+}
+
+// Wraps an async fn so it always resolves to { ok, data | error }.
+// Prevents Electron's "Error occurred in handler" auto-logging and gives
+// the renderer a uniform shape it can surface in the UI.
+function envelope(fn) {
+  return async (...args) => {
+    try { return { ok: true,  data:  await fn(...args) }; }
+    catch (e) { return { ok: false, error: friendlyErr(e) }; }
+  };
+}
+
+ipcMain.handle('k8s:listContexts', envelope(async () => {
   const kc = loadKubeconfigSafe();
   return kc.getContexts().map(c => ({
     name:      c.name,
@@ -97,16 +120,16 @@ ipcMain.handle('k8s:listContexts', async () => {
     user:      c.user,
     namespace: c.namespace || 'default',
   }));
-});
+}));
 
-ipcMain.handle('k8s:listNamespaces', async (_evt, contextName) => {
+ipcMain.handle('k8s:listNamespaces', envelope(async (_evt, contextName) => {
   const kc  = makeKc(contextName);
   const api = kc.makeApiClient(k8s.CoreV1Api);
   const res = await api.listNamespace();
   return res.body.items.map(ns => ns.metadata.name);
-});
+}));
 
-ipcMain.handle('k8s:listCNPGClusters', async (_evt, contextName, namespace) => {
+ipcMain.handle('k8s:listCNPGClusters', envelope(async (_evt, contextName, namespace) => {
   const kc  = makeKc(contextName);
   const api = kc.makeApiClient(k8s.CustomObjectsApi);
   const res = await api.listNamespacedCustomObject(
@@ -121,9 +144,9 @@ ipcMain.handle('k8s:listCNPGClusters', async (_evt, contextName, namespace) => {
     primary:    c.status?.currentPrimary,
     databases:  [c.spec.bootstrap?.initdb?.database].filter(Boolean),
   }));
-});
+}));
 
-ipcMain.handle('k8s:listCNPGUsers', async (_evt, contextName, namespace, clusterName) => {
+ipcMain.handle('k8s:listCNPGUsers', envelope(async (_evt, contextName, namespace, clusterName) => {
   const kc  = makeKc(contextName);
   const api = kc.makeApiClient(k8s.CoreV1Api);
   const res = await api.listNamespacedSecret(namespace);
@@ -134,9 +157,9 @@ ipcMain.handle('k8s:listCNPGUsers', async (_evt, contextName, namespace, cluster
       name:   s.metadata.name.slice(prefix.length),
       secret: s.metadata.name,
     }));
-});
+}));
 
-ipcMain.handle('k8s:readUserSecret', async (_evt, contextName, namespace, secretName) => {
+ipcMain.handle('k8s:readUserSecret', envelope(async (_evt, contextName, namespace, secretName) => {
   const kc  = makeKc(contextName);
   const api = kc.makeApiClient(k8s.CoreV1Api);
   const res = await api.readNamespacedSecret(secretName, namespace);
@@ -149,7 +172,7 @@ ipcMain.handle('k8s:readUserSecret', async (_evt, contextName, namespace, secret
     host:     dec(d.host),
     port:     dec(d.port) || '5432',
   };
-});
+}));
 
 // ─────────────────────────────────────────────────────────────────
 // IPC handlers — postgres

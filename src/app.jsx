@@ -17,10 +17,13 @@ const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280 };
 async function doConnect(id, target, updateTabFn) {
   try {
     const secretName = target.secret || `cnpg-${target.cluster}-user-${target.user}`;
-    const creds = await window.cloudpg.k8s.readUserSecret(
+    const credsRes = await window.cloudpg.k8s.readUserSecret(
       target.context, target.namespace, secretName
     );
-    if (!creds) throw new Error('Could not read secret ' + secretName);
+    if (!credsRes || !credsRes.ok) {
+      throw new Error(`could not read secret ${secretName} (via ${target.context}): ${credsRes?.error || 'unknown'}`);
+    }
+    const creds = credsRes.data;
 
     const result = await window.cloudpg.pg.connect(id, {
       contextName: target.context,

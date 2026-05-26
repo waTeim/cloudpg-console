@@ -62,7 +62,9 @@ window.backend = {
   // carries `contextNames` listing which kube contexts can reach it — used
   // both to pick a working context at connect time and for UI disambiguation.
   async bootstrap() {
-    const ctxList = await window.cloudpg.k8s.listContexts();
+    const ctxRes = await window.cloudpg.k8s.listContexts();
+    if (!ctxRes.ok) throw new Error(ctxRes.error || 'failed to load kubeconfig');
+    const ctxList = ctxRes.data;
 
     // Group kube contexts by the k8s cluster they point at.
     const byCluster = {};
@@ -74,44 +76,46 @@ window.backend = {
     const clusters = {};
 
     await Promise.allSettled(Object.entries(byCluster).map(async ([clusterName, ctxs]) => {
+      // Track per-context errors so the UI can show *why* a context failed
+      // (expired creds, host unreachable, etc) instead of just silently
+      // omitting it.
+      const errors = {};
+
       // Union of namespaces reachable from any context on this cluster.
       const nsMap = new Map();  // nsName -> Set<contextName>
-      await Promise.allSettled(ctxs.map(async (ctx) => {
-        try {
-          const nsNames = await window.cloudpg.k8s.listNamespaces(ctx.name);
-          for (const n of nsNames) {
-            if (!nsMap.has(n)) nsMap.set(n, new Set());
-            nsMap.get(n).add(ctx.name);
-          }
-        } catch (_) {}
+      await Promise.all(ctxs.map(async (ctx) => {
+        const res = await window.cloudpg.k8s.listNamespaces(ctx.name);
+        if (!res.ok) { errors[ctx.name] = res.error; return; }
+        for (const n of res.data) {
+          if (!nsMap.has(n)) nsMap.set(n, new Set());
+          nsMap.get(n).add(ctx.name);
+        }
       }));
 
       const namespaces = [];
       await Promise.all([...nsMap.entries()].map(async ([nsName, ctxSet]) => {
-        // Union of CNPG clusters in this namespace across all qualifying contexts.
         const cnpgMap = new Map();  // cnpgName -> { ...cnpg, userMap, contextNames }
 
-        await Promise.allSettled([...ctxSet].map(async (ctxName) => {
-          let cnpgClusters = [];
-          try {
-            cnpgClusters = await window.cloudpg.k8s.listCNPGClusters(ctxName, nsName);
-          } catch (_) { return; }
+        await Promise.all([...ctxSet].map(async (ctxName) => {
+          const clRes = await window.cloudpg.k8s.listCNPGClusters(ctxName, nsName);
+          if (!clRes.ok) return;  // namespace-level access failure: just skip
+          const cnpgClusters = clRes.data;
 
-          await Promise.allSettled(cnpgClusters.map(async (cl) => {
+          await Promise.all(cnpgClusters.map(async (cl) => {
             if (!cnpgMap.has(cl.name)) {
               cnpgMap.set(cl.name, { ...cl, userMap: new Map(), contextNames: new Set() });
             }
             cnpgMap.get(cl.name).contextNames.add(ctxName);
-            try {
-              const users = await window.cloudpg.k8s.listCNPGUsers(ctxName, nsName, cl.name);
-              const slot  = cnpgMap.get(cl.name);
-              for (const u of users) {
-                if (!slot.userMap.has(u.name)) {
-                  slot.userMap.set(u.name, { ...u, contextNames: new Set() });
-                }
-                slot.userMap.get(u.name).contextNames.add(ctxName);
+
+            const userRes = await window.cloudpg.k8s.listCNPGUsers(ctxName, nsName, cl.name);
+            if (!userRes.ok) return;
+            const slot = cnpgMap.get(cl.name);
+            for (const u of userRes.data) {
+              if (!slot.userMap.has(u.name)) {
+                slot.userMap.set(u.name, { ...u, contextNames: new Set() });
               }
-            } catch (_) {}
+              slot.userMap.get(u.name).contextNames.add(ctxName);
+            }
           }));
         }));
 
@@ -135,6 +139,7 @@ window.backend = {
         name:         clusterName,
         contextNames: ctxs.map(c => c.name),
         namespaces,
+        errors,
       };
     }));
 

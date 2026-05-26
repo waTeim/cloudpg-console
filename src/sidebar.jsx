@@ -196,9 +196,41 @@ function Sidebar({
                     ? `${c.contextNames.length} ctx`
                     : (c.contextNames || [])[0]
                 }
+                indicator={
+                  c.errors && Object.keys(c.errors).length > 0 && (
+                    <span
+                      className="badge warn"
+                      title={Object.entries(c.errors).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                      style={{ cursor: 'help' }}
+                    >
+                      <span className="dot" />
+                      {Object.keys(c.errors).length === (c.contextNames || []).length ? "unreachable" : `${Object.keys(c.errors).length} err`}
+                    </span>
+                  )
+                }
                 onToggle={() => toggleSet(openCtx, cn, setOpenCtx)}
                 onClick={() => toggleSet(openCtx, cn, setOpenCtx)}
               />
+              {ctxOpen && nsList.length === 0 && c.errors && Object.keys(c.errors).length > 0 && (
+                Object.entries(c.errors).map(([ctxName, msg]) => (
+                  <div
+                    key={ctxName}
+                    className="tree-row"
+                    style={{
+                      paddingLeft: 6 + 1 * 14,
+                      color: "var(--fg-mute)", cursor: "default",
+                      fontStyle: "italic", fontSize: 11,
+                    }}
+                    title={msg}
+                  >
+                    <span className="chev is-leaf"></span>
+                    <span className="glyph"><Icon name="x" size={11} /></span>
+                    <span className="label" style={{ color: "var(--err, var(--fg-mute))" }}>
+                      {ctxName}: {msg}
+                    </span>
+                  </div>
+                ))
+              )}
               {ctxOpen && nsList.map(n => {
                 const nsKey   = `${cn}::${n.name}`;
                 const nsOpen  = openNs.has(nsKey);
