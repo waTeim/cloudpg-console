@@ -456,25 +456,56 @@ function Session({ tab, onUpdateTab }) {
     return `${tab.db}->`;
   }, [buffer, tab.db]);
 
-  const run = (text) => {
+  const run = async (text) => {
     const sql = text.trim();
     if (!sql) return;
-    const result = execSql(sql, ctx);
-    if (result.kind === "quit") {
-      onUpdateTab({ _close: true });
-      return;
-    }
-    const log = (tab.log || []).slice();
-    log.push({ kind: "prompt", db: tab.db, text: sql });
-    log.push({ kind: "result", result });
-    const ms = (0.4 + Math.random() * 80).toFixed(1);
-    if (tab.timing) log.push({ kind: "timing", ms });
-    onUpdateTab({
-      log,
-      history: [sql, ...(tab.history || []).filter(h => h !== sql)].slice(0, 200),
-    });
+
     setBuffer("");
     setHIdx(-1);
+
+    // Meta-commands (\ prefix) are handled client-side using the schema cache.
+    if (sql.startsWith("\\")) {
+      const result = execSql(sql, ctx);
+      if (result.kind === "quit") { onUpdateTab({ _close: true }); return; }
+      const log = (tab.log || []).slice();
+      log.push({ kind: "prompt", db: tab.db, text: sql });
+      log.push({ kind: "result", result });
+      if (tab.timing) log.push({ kind: "timing", ms: (0.1 + Math.random() * 2).toFixed(1) });
+      onUpdateTab({ log, history: [sql, ...(tab.history || []).filter(h => h !== sql)].slice(0, 200) });
+      return;
+    }
+
+    // Real SQL: append prompt immediately, then await the IPC query.
+    const logBefore = [...(tab.log || []), { kind: "prompt", db: tab.db, text: sql }];
+    onUpdateTab({ log: logBefore, history: [sql, ...(tab.history || []).filter(h => h !== sql)].slice(0, 200) });
+
+    const t0 = Date.now();
+    try {
+      const res = await window.cloudpg.pg.query(tab.id, sql);
+      const ms  = (Date.now() - t0).toString();
+
+      let result;
+      if (res.error) {
+        result = {
+          kind: "error",
+          message: res.error + (res.where ? "\n" + res.where : "") + (res.code ? " (" + res.code + ")" : ""),
+        };
+      } else if (res.rows && res.rows.length > 0) {
+        const cols = (res.fields || []).map(f => ({ name: f.name, type: "" }));
+        result = { kind: "table", cols, rows: res.rows };
+      } else if (res.command) {
+        result = { kind: "command", message: `${res.command}${res.rowCount != null ? " " + res.rowCount : ""}` };
+      } else {
+        result = { kind: "command", message: "OK" };
+      }
+
+      const newLog = [...logBefore, { kind: "result", result }];
+      if (tab.timing) newLog.push({ kind: "timing", ms });
+      onUpdateTab({ log: newLog });
+    } catch (err) {
+      const newLog = [...logBefore, { kind: "result", result: { kind: "error", message: err.message } }];
+      onUpdateTab({ log: newLog });
+    }
   };
 
   // Autocomplete: position popover above the textarea at the caret.

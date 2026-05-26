@@ -2,43 +2,65 @@
    Top-level App: titlebar, tabbar, sidebar host, session host
    ============================================================ */
 
-const { useState: aUseState, useEffect: aUseEffect, useCallback: aUseCallback, useMemo: aUseMemo } = React;
+const {
+  useState: aUseState,
+  useEffect: aUseEffect,
+  useCallback: aUseCallback,
+  useMemo: aUseMemo,
+  useRef: aUseRef,
+} = React;
 
-const STARTER_LOG = (t) => [
-  { kind: "welcome", text: `psql (16.2, server ${t.pgVersion})` },
-  { kind: "welcome", text: `Loaded credentials from secret "cnpg-${t.cluster}-user-${t.user}" in namespace "${t.namespace}".` },
-  { kind: "welcome", text: `Port-forward: 127.0.0.1:5432 → ${t.cluster}-rw.${t.namespace}.svc:5432  (TLS verified)` },
-  { kind: "welcome", text: `Connected to database "${t.db}" as "${t.user}".` },
-  { kind: "notice",  text: `Type "\\?" for help.` },
-];
+const RECENT_KEY  = "cloudpg.recents";
+const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280 };
 
-const RECENT_KEY = "cloudpg.recents";
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-  "theme": "paper",
-  "sidebarWidth": 280
-}/*EDITMODE-END*/;
+// Kick off a real postgres connect in the background after the tab is created.
+async function doConnect(id, target, updateTabFn) {
+  try {
+    const secretName = target.secret || `cnpg-${target.cluster}-user-${target.user}`;
+    const creds = await window.cloudpg.k8s.readUserSecret(
+      target.context, target.namespace, secretName
+    );
+    if (!creds) throw new Error('Could not read secret ' + secretName);
 
-function lookupContextTarget(context, namespace, cluster, user, db) {
-  const c = window.CONTEXTS[context];
-  if (!c) return null;
-  const n = c.namespaces.find(n => n.name === namespace);
-  if (!n) return null;
-  const cl = n.clusters.find(cl => cl.name === cluster);
-  if (!cl) return null;
-  const u = cl.users.find(u => u.name === user);
-  if (!u) return null;
-  const targetDb = db && u.databases.includes(db) ? db : u.databases[0];
-  if (!targetDb) return null;
-  return {
-    key: `${context}::${namespace}::${cluster}::${user}::${targetDb}`,
-    context, namespace, cluster: cl.name,
-    user: u.name, role: u.role,
-    db: targetDb,
-    phase: cl.phase, pgVersion: cl.pgVersion,
-    ready: cl.ready, instances: cl.instances,
-    users: cl.users,
-    databases: cl.databases,
-  };
+    const result = await window.cloudpg.pg.connect(id, {
+      contextName: target.context,
+      namespace:   target.namespace,
+      clusterName: target.cluster,
+      user:        creds.username || target.user,
+      password:    creds.password,
+      database:    target.db,
+    });
+
+    if (!result.ok) throw new Error(result.error);
+
+    // List all accessible databases for \l and the sidebar's post-connect list.
+    const dbsRes = await window.cloudpg.pg.query(id,
+      "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname");
+    const allDatabases = dbsRes.rows ? dbsRes.rows.map(r => r.datname) : [target.db];
+
+    // Extract pg version from banner, e.g. "PostgreSQL 16.2 on …"
+    const pgVersion = (result.info?.server || '').match(/PostgreSQL\s+([\d.]+)/)?.[1]
+      || target.pgVersion || '?';
+
+    updateTabFn(id, {
+      connected:    true,
+      pgVersion,
+      allDatabases,
+      log: [
+        { kind: 'welcome', text: result.info?.server || 'Connected' },
+        { kind: 'welcome', text: `Connected to database "${target.db}" as "${creds.username || target.user}".` },
+        { kind: 'notice',  text: 'Type "\\?" for help.' },
+      ],
+    });
+
+    // Populate schema cache asynchronously (for \dt, autocomplete, etc.)
+    window.backend.introspect(id, target.db);
+
+  } catch (err) {
+    updateTabFn(id, {
+      log: [{ kind: 'error', text: String(err.message || err) }],
+    });
+  }
 }
 
 function Titlebar({ sidebarHidden, onToggleSidebar }) {
@@ -164,26 +186,33 @@ function Statusbar({ tab, tabs }) {
       )}
       <span className="right">
         <span className="item">tabs <b>{tabs.length}</b></span>
-        <span className="item">tls <b>verified</b></span>
         <span className="item">UTF8 / en_US.utf8</span>
       </span>
     </div>
   );
 }
 
-function EmptyState({ onOpenPalette, onPick, recents }) {
+function EmptyState({ onOpenPalette, onPick, recents, contexts }) {
+  const ctxCount  = Object.keys(contexts || {}).length;
+  const allTargets = aUseMemo(() => window.flattenTargets(contexts), [contexts]);
+
   const samples = aUseMemo(() => {
-    const all = window.flattenTargets();
-    return [...recents.slice(0, 2), ...all.filter(t => !recents.some(r => r.key === t.key)).slice(0, 3)].slice(0, 4);
-  }, [recents]);
+    return [...recents.slice(0, 2),
+            ...allTargets.filter(t => !recents.some(r => r.key === t.key)).slice(0, 3)]
+      .slice(0, 4);
+  }, [recents, allTargets]);
+
   return (
     <div className="empty">
       <div className="card">
         <div className="glyph"><Icon name="logo" size={28} /></div>
         <h1>Open a Postgres cluster</h1>
         <p>
-          Detected <b style={{color:"var(--fg)"}}>{Object.keys(window.CONTEXTS).length}</b> kubernetes contexts,{" "}
-          <b style={{color:"var(--fg)"}}>{window.flattenTargets().length}</b> reachable (user, database) pairs.<br />
+          {ctxCount > 0
+            ? <>Detected <b style={{color:"var(--fg)"}}>{ctxCount}</b> kubernetes contexts, <b style={{color:"var(--fg)"}}>{allTargets.length}</b> reachable (user, database) pairs.</>
+            : <>Loading kubernetes contexts…</>
+          }
+          <br />
           Pick a target from the sidebar, or jump straight in with the switcher.
         </p>
         <div className="kbd-row">
@@ -194,21 +223,23 @@ function EmptyState({ onOpenPalette, onPick, recents }) {
           </button>
         </div>
 
-        <div className="recents">
-          <div className="head">{recents.length ? "Recent" : "Suggested"}</div>
-          {samples.map(t => (
-            <div key={t.key} className="row" onClick={() => onPick(t)}>
-              <Icon name="db" size={13} />
-              <span className="path">
-                <span className="ctx">{t.context}</span>
-                <span className="sep">/</span>{t.namespace}
-                <span className="sep">/</span>{t.cluster}
-                <span className="sep">/</span>{t.user}
-              </span>
-              <span className="when">{t.role}</span>
-            </div>
-          ))}
-        </div>
+        {samples.length > 0 && (
+          <div className="recents">
+            <div className="head">{recents.length ? "Recent" : "Suggested"}</div>
+            {samples.map(t => (
+              <div key={t.key} className="row" onClick={() => onPick(t)}>
+                <Icon name="db" size={13} />
+                <span className="path">
+                  <span className="ctx">{t.context}</span>
+                  <span className="sep">/</span>{t.namespace}
+                  <span className="sep">/</span>{t.cluster}
+                  <span className="sep">/</span>{t.user}
+                </span>
+                <span className="when">{t.role || "user"}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -216,15 +247,28 @@ function EmptyState({ onOpenPalette, onPick, recents }) {
 
 // =========================================================
 function App() {
-  // Tweaks
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   aUseEffect(() => {
-    document.documentElement.setAttribute("data-theme", t.theme || "ink");
+    document.documentElement.setAttribute("data-theme", t.theme || "paper");
   }, [t.theme]);
 
   const [sidebarWidth, setSidebarWidth] = aUseState(t.sidebarWidth ?? 280);
   const [sidebarHidden, setSidebarHidden] = aUseState(false);
   aUseEffect(() => { setSidebarWidth(t.sidebarWidth ?? 280); }, [t.sidebarWidth]);
+
+  // k8s contexts, loaded async on startup
+  const [contexts, setContexts] = aUseState({});
+
+  const loadContexts = aUseCallback(async () => {
+    try {
+      const ctxData = await window.backend.bootstrap();
+      setContexts(ctxData);
+    } catch (err) {
+      console.error('Failed to load contexts:', err);
+    }
+  }, []);
+
+  aUseEffect(() => { loadContexts(); }, []);
 
   const [tabs, setTabs] = aUseState([]);
   const [activeId, setActiveId] = aUseState(null);
@@ -234,54 +278,25 @@ function App() {
     try {
       const raw = localStorage.getItem(RECENT_KEY);
       if (raw) return JSON.parse(raw);
-    } catch {}
+    } catch (_) {}
     return [];
   });
   const pushRecent = aUseCallback((target) => {
     setRecentsRaw(prev => {
       const next = [target, ...prev.filter(p => p.key !== target.key)].slice(0, 6);
-      try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch (_) {}
       return next;
     });
   }, []);
 
-  // Open / activate / close
-  const openSession = aUseCallback((target) => {
-    const t = target && target.key
-      ? target
-      : lookupContextTarget(target.context, target.namespace, target.cluster, target.user, target.db);
-    if (!t) return;
-    // If a matching tab is already open, just activate it.
-    const existing = (id => null)(); // placeholder
-    setTabs(prev => {
-      const match = prev.find(p => p.key === t.key);
-      if (match) {
-        setActiveId(match.id);
-        return prev;
-      }
-      const id = `tab-${Math.random().toString(36).slice(2, 8)}`;
-      const newTab = {
-        id, key: t.key,
-        context: t.context, namespace: t.namespace, cluster: t.cluster,
-        user: t.user, role: t.role, db: t.db,
-        phase: t.phase, pgVersion: t.pgVersion,
-        ready: t.ready, instances: t.instances,
-        allUsers: t.users,
-        allDatabases: t.databases,
-        log: STARTER_LOG(t),
-        history: [],
-        timing: false,
-      };
-      setActiveId(id);
-      return [...prev, newTab];
-    });
-    pushRecent(t);
-  }, [pushRecent]);
+  // Keep an always-current reference to updateTab for use in async callbacks.
+  const updateTabRef = aUseRef(null);
 
   const closeTab = aUseCallback((id) => {
+    window.cloudpg?.pg?.disconnect(id).catch(() => {});
     setTabs(prev => {
-      const idx = prev.findIndex(t => t.id === id);
-      const next = prev.filter(t => t.id !== id);
+      const idx  = prev.findIndex(tab => tab.id === id);
+      const next = prev.filter(tab => tab.id !== id);
       if (id === activeId) {
         const newActive = next[idx] || next[idx - 1] || next[0];
         setActiveId(newActive ? newActive.id : null);
@@ -290,12 +305,52 @@ function App() {
     });
   }, [activeId]);
 
-  const updateTab = aUseCallback((id, patch) => {
+  const updateTabWithClose = aUseCallback((id, patch) => {
     if (patch && patch._close) { closeTab(id); return; }
-    setTabs(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+    setTabs(prev => prev.map(tab => tab.id === id ? { ...tab, ...patch } : tab));
   }, [closeTab]);
 
-  // ⌘K
+  updateTabRef.current = updateTabWithClose;
+
+  const openSession = aUseCallback((target) => {
+    const key = `${target.context}::${target.namespace}::${target.cluster}::${target.user}::${target.db}`;
+
+    setTabs(prev => {
+      const match = prev.find(p => p.key === key);
+      if (match) {
+        setActiveId(match.id);
+        return prev;
+      }
+      const id = `tab-${Math.random().toString(36).slice(2, 8)}`;
+      setActiveId(id);
+
+      // Kick off the async connect — updateTabRef.current is always fresh.
+      doConnect(id, { ...target, key }, (tabId, patch) => updateTabRef.current(tabId, patch));
+
+      return [...prev, {
+        id, key,
+        context:      target.context,
+        namespace:    target.namespace,
+        cluster:      target.cluster,
+        user:         target.user,
+        role:         target.role || '',
+        db:           target.db,
+        phase:        target.phase || 'Unknown',
+        pgVersion:    target.pgVersion || '?',
+        ready:        target.ready  ?? 0,
+        instances:    target.instances ?? 0,
+        allUsers:     target.users || [],
+        allDatabases: [target.db],
+        log:          [{ kind: 'welcome', text: 'Connecting…' }],
+        history:      [],
+        timing:       false,
+      }];
+    });
+
+    pushRecent({ ...target, key });
+  }, [pushRecent]);
+
+  // ⌘K / ⌘B / ⌘W / ⌘T keyboard shortcuts
   aUseEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -320,16 +375,6 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [paletteOpen, activeId, closeTab]);
 
-  // Open one default tab on first load to show off the design.
-  aUseEffect(() => {
-    if (tabs.length === 0) {
-      const defaults = window.flattenTargets();
-      const seed = defaults.find(d => d.cluster === "billing-db" && d.context === "prod-us-east-1" && d.user === "app" && d.db === "billing");
-      if (seed) openSession(seed);
-    }
-    // eslint-disable-next-line
-  }, []);
-
   const activeTab = tabs.find(t => t.id === activeId) || null;
 
   return (
@@ -341,11 +386,13 @@ function App() {
 
       <div className="app-body" data-sidebar={sidebarHidden ? "hidden" : "open"} style={{ "--sidebar-w": `${sidebarWidth}px` }}>
         <Sidebar
+          contexts={contexts}
           width={sidebarWidth}
           onResize={(w) => { setSidebarWidth(w); setTweak("sidebarWidth", w); }}
           onCollapse={() => setSidebarHidden(true)}
           onOpenSession={openSession}
           highlightKey={activeTab ? activeTab.key : null}
+          onRefresh={loadContexts}
         />
 
         <div className="main">
@@ -362,7 +409,7 @@ function App() {
               <Breadcrumb tab={activeTab} />
               <Session
                 tab={activeTab}
-                onUpdateTab={(patch) => updateTab(activeTab.id, patch)}
+                onUpdateTab={(patch) => updateTabWithClose(activeTab.id, patch)}
               />
             </>
           ) : (
@@ -370,6 +417,7 @@ function App() {
               onOpenPalette={() => setPaletteOpen(true)}
               onPick={openSession}
               recents={recents}
+              contexts={contexts}
             />
           )}
         </div>
@@ -382,9 +430,9 @@ function App() {
         onClose={() => setPaletteOpen(false)}
         onPick={(target) => { setPaletteOpen(false); openSession(target); }}
         recents={recents}
+        contexts={contexts}
       />
 
-      {/* Tweaks panel */}
       <TweaksPanel title="Tweaks">
         <TweakSection label="Theme" />
         <TweakRadio

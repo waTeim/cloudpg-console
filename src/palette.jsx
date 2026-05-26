@@ -1,32 +1,32 @@
 /* ============================================================
    Cmd-K quick switcher with facet filters (ctx / ns / user / db).
-   Filters are faceted: setting one narrows the options for the others.
-   Text input also fuzzy-matches across all fields.
    ============================================================ */
 
 const { useState: pUseState, useEffect: pUseEffect, useMemo: pUseMemo, useRef: pUseRef } = React;
 
-function flattenTargets() {
+function flattenTargets(contexts) {
+  const ctxMap = contexts || {};
   const out = [];
-  for (const [cn, c] of Object.entries(window.CONTEXTS)) {
-    for (const n of c.namespaces) {
-      for (const cl of n.clusters) {
-        for (const u of cl.users) {
-          for (const db of (u.databases || [])) {
+  for (const [cn, c] of Object.entries(ctxMap)) {
+    for (const n of (c.namespaces || [])) {
+      for (const cl of (n.clusters || [])) {
+        for (const u of (cl.users || [])) {
+          for (const db of (u.databases || cl.databases || [])) {
             out.push({
               key: `${cn}::${n.name}::${cl.name}::${u.name}::${db}`,
-              context: cn,
-              namespace: n.name,
-              cluster: cl.name,
-              user: u.name,
-              role: u.role,
+              context:    cn,
+              namespace:  n.name,
+              cluster:    cl.name,
+              user:       u.name,
+              role:       u.role || '',
+              secret:     u.secret || '',
               db,
-              phase: cl.phase,
-              users: cl.users,
-              databases: cl.databases,
-              pgVersion: cl.pgVersion,
-              ready: cl.ready,
-              instances: cl.instances,
+              phase:      cl.phase,
+              users:      cl.users,
+              databases:  cl.databases,
+              pgVersion:  cl.pgVersion,
+              ready:      cl.ready,
+              instances:  cl.instances,
             });
           }
         }
@@ -107,7 +107,7 @@ function FacetChip({ facet, value, open, onOpen, onClear, options, onSelect, dis
   );
 }
 
-function CommandPalette({ open, onClose, onPick, recents = [] }) {
+function CommandPalette({ open, onClose, onPick, recents = [], contexts }) {
   const [q, setQ] = pUseState("");
   const [idx, setIdx] = pUseState(0);
   const [filters, setFilters] = pUseState({});
@@ -117,15 +117,16 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
   const rootRef = pUseRef(null);
 
   pUseEffect(() => {
-    if (open) { setQ(""); setIdx(0); setFilters({}); setOpenFacet(null);
-      setTimeout(() => inputRef.current?.focus(), 10); }
+    if (open) {
+      setQ(""); setIdx(0); setFilters({}); setOpenFacet(null);
+      setTimeout(() => inputRef.current?.focus(), 10);
+    }
   }, [open]);
 
-  const allTargets = pUseMemo(flattenTargets, []);
+  const allTargets = pUseMemo(() => flattenTargets(contexts), [contexts]);
 
-  // Apply facet filters first (AND). Returns the subset of targets.
-  const passesFilters = (t, filters) => {
-    for (const [k, v] of Object.entries(filters)) {
+  const passesFilters = (t, f) => {
+    for (const [k, v] of Object.entries(f)) {
       if (!v) continue;
       if (t[k] !== v) return false;
     }
@@ -137,8 +138,6 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
     [allTargets, filters]
   );
 
-  // For each facet, compute distinct option values **when the OTHER
-  // filters are applied** — classic faceted search.
   const facetOptions = pUseMemo(() => {
     const out = {};
     for (const f of FACETS) {
@@ -157,13 +156,14 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
     return out;
   }, [allTargets, filters]);
 
-  // Apply text search on top of facet filtering.
   const results = pUseMemo(() => {
     if (!q) {
       const recentSet = new Set(recents.map(r => r.key));
       const grouped = [
-        { group: "Recent", items: filteredByFacets.filter(t => recentSet.has(t.key)) },
-        { group: filteredByFacets.length === allTargets.length ? "All targets" : `${filteredByFacets.length} match${filteredByFacets.length===1?"":"es"}`,
+        { group: "Recent",   items: filteredByFacets.filter(t => recentSet.has(t.key)) },
+        { group: filteredByFacets.length === allTargets.length
+            ? "All targets"
+            : `${filteredByFacets.length} match${filteredByFacets.length === 1 ? "" : "es"}`,
           items: filteredByFacets.filter(t => !recentSet.has(t.key)).slice(0, 40) },
       ].filter(g => g.items.length);
       return grouped;
@@ -175,7 +175,7 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
       if (m) scored.push({ target: t, ...m });
     }
     scored.sort((a, b) => b.score - a.score);
-    return [{ group: `${scored.length} match${scored.length===1?"":"es"}`,
+    return [{ group: `${scored.length} match${scored.length === 1 ? "" : "es"}`,
               items: scored.slice(0, 40).map(s => s.target) }];
   }, [q, filteredByFacets, recents, allTargets.length]);
 
@@ -188,12 +188,10 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
     if (node) node.scrollIntoView({ block: "nearest" });
   }, [idx]);
 
-  // Close any open facet popover when clicking elsewhere inside the palette.
   pUseEffect(() => {
     if (!openFacet) return;
     const onDoc = (e) => {
-      const inFacet = e.target.closest?.(".facet-chip");
-      if (!inFacet) setOpenFacet(null);
+      if (!e.target.closest?.(".facet-chip")) setOpenFacet(null);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -202,15 +200,10 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
   if (!open) return null;
 
   const onKeyDown = (e) => {
-    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+    if (e.key === "Escape")    { e.preventDefault(); onClose(); return; }
     if (e.key === "ArrowDown") { e.preventDefault(); setIdx(i => Math.min(flat.length - 1, i + 1)); return; }
     if (e.key === "ArrowUp")   { e.preventDefault(); setIdx(i => Math.max(0, i - 1)); return; }
-    if (e.key === "Enter") {
-      e.preventDefault();
-      const pick = flat[idx];
-      if (pick) onPick(pick);
-    }
-    // Backspace on empty query clears the last set facet
+    if (e.key === "Enter")     { e.preventDefault(); const pick = flat[idx]; if (pick) onPick(pick); }
     if (e.key === "Backspace" && q === "") {
       const setIds = FACETS.map(f => f.id).filter(id => filters[id]);
       if (setIds.length) {
@@ -314,7 +307,7 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
                         ns {t.namespace}
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
-                        {t.role}
+                        {t.role || "user"}
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
                         pg {t.pgVersion}
                       </div>
@@ -327,7 +320,7 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
           ))}
           {flat.length === 0 && (
             <div style={{ padding: 24, textAlign: "center", color: "var(--fg-mute)" }}>
-              No matches.
+              {allTargets.length === 0 ? "Loading…" : "No matches."}
               {Object.values(filters).some(Boolean) && (
                 <div style={{ marginTop: 8 }}>
                   <button onClick={() => setFilters({})} style={{ color: "var(--accent)", fontSize: 12 }}>
@@ -342,7 +335,7 @@ function CommandPalette({ open, onClose, onPick, recents = [] }) {
           <span><span className="key">↑↓</span> navigate</span>
           <span><span className="key">↵</span> open in tab</span>
           <span><span className="key">⌫</span> remove last filter</span>
-          <span style={{ marginLeft: "auto" }}>{allTargets.length} targets · {Object.keys(window.CONTEXTS).length} contexts</span>
+          <span style={{ marginLeft: "auto" }}>{allTargets.length} targets · {Object.keys(contexts || {}).length} contexts</span>
         </div>
       </div>
     </div>

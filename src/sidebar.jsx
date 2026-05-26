@@ -1,8 +1,5 @@
 /* ============================================================
    Sidebar — context → namespace → pg-cluster → [user] → database
-   Anchored to root. PG-cluster expansion stops at the user
-   selection until a user is picked, then exposes only the
-   databases that user can access.
    ============================================================ */
 
 const { useState, useMemo, useRef, useEffect } = React;
@@ -56,15 +53,16 @@ function TreeRow({
 }
 
 function Sidebar({
+  contexts,
   width, onResize, onCollapse,
   onOpenSession,
   highlightKey,
+  onRefresh,
 }) {
   const [query, setQuery] = useState("");
-  const [openCtx, setOpenCtx] = useState(() => new Set(["prod-us-east-1", "team-alpha-eks"]));
-  const [openNs, setOpenNs] = useState(() => new Set(["prod-us-east-1::platform", "team-alpha-eks::alpha-svc"]));
-  const [openCl, setOpenCl] = useState(() => new Set());
-  // Per-pg-cluster selected user: key = `${ctx}::${ns}::${cluster}`
+  const [openCtx, setOpenCtx] = useState(() => new Set());
+  const [openNs,  setOpenNs]  = useState(() => new Set());
+  const [openCl,  setOpenCl]  = useState(() => new Set());
   const [selectedUser, setSelectedUser] = useState(() => new Map());
 
   const toggleSet = (set, key, setter) => {
@@ -75,19 +73,16 @@ function Sidebar({
 
   const matches = (s) => !query || (s || "").toLowerCase().includes(query.toLowerCase());
 
-  // Auto-expand matching parents when searching
   useEffect(() => {
     if (!query) return;
-    const ns = new Set();
-    const cls = new Set();
-    const ctx = new Set();
-    for (const [cn, c] of Object.entries(window.CONTEXTS)) {
-      let ctxMatch = matches(cn);
-      for (const n of c.namespaces) {
-        let nsMatch = matches(n.name);
-        for (const cluster of n.clusters) {
-          const usersMatch = cluster.users.some(u => matches(u.name) || matches(u.secret));
-          const dbsMatch = cluster.databases.some(d => matches(d));
+    const ns = new Set(), cls = new Set(), ctx = new Set();
+    for (const [cn, c] of Object.entries(contexts || {})) {
+      const ctxMatch = matches(cn);
+      for (const n of (c.namespaces || [])) {
+        const nsMatch = matches(n.name);
+        for (const cluster of (n.clusters || [])) {
+          const usersMatch = (cluster.users || []).some(u => matches(u.name));
+          const dbsMatch   = (cluster.databases || []).some(d => matches(d));
           if (matches(cluster.name) || usersMatch || dbsMatch) {
             cls.add(`${cn}::${n.name}::${cluster.name}`);
             ns.add(`${cn}::${n.name}`);
@@ -107,8 +102,7 @@ function Sidebar({
   const gripRef = useRef(null);
   const onGripDown = (e) => {
     e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
+    const startX = e.clientX, startW = width;
     gripRef.current?.classList.add("is-dragging");
     const move = (ev) => onResize(Math.max(220, Math.min(520, startW + (ev.clientX - startX))));
     const up = () => {
@@ -122,17 +116,17 @@ function Sidebar({
 
   const totals = useMemo(() => {
     let clusters = 0, ns = 0, ctx = 0;
-    for (const c of Object.values(window.CONTEXTS)) {
+    for (const c of Object.values(contexts || {})) {
       ctx++;
-      for (const n of c.namespaces) {
+      for (const n of (c.namespaces || [])) {
         ns++;
-        clusters += n.clusters.length;
+        clusters += (n.clusters || []).length;
       }
     }
     return { clusters, ns, ctx };
-  }, []);
+  }, [contexts]);
 
-  const contexts = Object.entries(window.CONTEXTS);
+  const ctxEntries = Object.entries(contexts || {});
 
   return (
     <aside className="sidebar" style={{ width }}>
@@ -165,21 +159,28 @@ function Sidebar({
       </div>
 
       <div className="tree">
-        {contexts.map(([cn, c]) => {
+        {ctxEntries.length === 0 && (
+          <div className="tree-row" style={{ color: "var(--fg-mute)", fontStyle: "italic", cursor: "default", paddingLeft: 20 }}>
+            <span className="label">Loading contexts…</span>
+          </div>
+        )}
+        {ctxEntries.map(([cn, c]) => {
           if (query) {
-            const anyMatch = matches(cn) || c.namespaces.some(n => matches(n.name) ||
-              n.clusters.some(cl => matches(cl.name) ||
-                cl.databases.some(d => matches(d)) ||
-                cl.users.some(u => matches(u.name) || matches(u.secret))));
+            const anyMatch = matches(cn) || (c.namespaces || []).some(n =>
+              matches(n.name) || (n.clusters || []).some(cl =>
+                matches(cl.name) ||
+                (cl.databases || []).some(d => matches(d)) ||
+                (cl.users || []).some(u => matches(u.name))));
             if (!anyMatch) return null;
           }
           const ctxOpen = openCtx.has(cn);
-          const nsList = c.namespaces.filter(n => {
+          const nsList = (c.namespaces || []).filter(n => {
             if (!query) return true;
             if (matches(cn) || matches(n.name)) return true;
-            return n.clusters.some(cl => matches(cl.name) ||
-              cl.databases.some(d => matches(d)) ||
-              cl.users.some(u => matches(u.name) || matches(u.secret)));
+            return (n.clusters || []).some(cl =>
+              matches(cl.name) ||
+              (cl.databases || []).some(d => matches(d)) ||
+              (cl.users || []).some(u => matches(u.name)));
           });
           return (
             <React.Fragment key={cn}>
@@ -194,32 +195,35 @@ function Sidebar({
                 onClick={() => toggleSet(openCtx, cn, setOpenCtx)}
               />
               {ctxOpen && nsList.map(n => {
-                const nsKey = `${cn}::${n.name}`;
-                const nsOpen = openNs.has(nsKey);
-                const clusters = n.clusters.filter(cl => {
+                const nsKey   = `${cn}::${n.name}`;
+                const nsOpen  = openNs.has(nsKey);
+                const clusters = (n.clusters || []).filter(cl => {
                   if (!query) return true;
                   if (matches(cn) || matches(n.name) || matches(cl.name)) return true;
-                  return cl.databases.some(d => matches(d)) ||
-                    cl.users.some(u => matches(u.name) || matches(u.secret));
+                  return (cl.databases || []).some(d => matches(d)) ||
+                         (cl.users || []).some(u => matches(u.name));
                 });
                 return (
                   <React.Fragment key={nsKey}>
                     <TreeRow
                       depth={1}
                       open={nsOpen}
-                      hasChildren={n.clusters.length > 0}
+                      hasChildren={(n.clusters || []).length > 0}
                       glyph={<Icon name="ns" size={13} />}
                       label={highlight(n.name, query)}
-                      meta={n.clusters.length ? `${n.clusters.length}` : "—"}
+                      meta={(n.clusters || []).length ? `${n.clusters.length}` : "—"}
                       onToggle={() => toggleSet(openNs, nsKey, setOpenNs)}
                       onClick={() => toggleSet(openNs, nsKey, setOpenNs)}
                     />
                     {nsOpen && clusters.map(cl => {
-                      const clKey = `${cn}::${n.name}::${cl.name}`;
+                      const clKey  = `${cn}::${n.name}::${cl.name}`;
                       const clOpen = openCl.has(clKey);
                       const userName = selectedUser.get(clKey);
-                      const user = userName ? cl.users.find(u => u.name === userName) : null;
-                      const availableDbs = user ? user.databases : [];
+                      const user     = userName ? (cl.users || []).find(u => u.name === userName) : null;
+                      // Use user.databases if present, else fall back to cluster.databases
+                      const availableDbs = user
+                        ? (user.databases || cl.databases || [])
+                        : [];
                       return (
                         <React.Fragment key={clKey}>
                           <TreeRow
@@ -241,15 +245,16 @@ function Sidebar({
                                   paddingLeft: 6 + 3 * 14, cursor: "default",
                                   color: "var(--fg-mute)", fontSize: 10.5,
                                   textTransform: "uppercase", letterSpacing: "0.06em",
-                                  fontFamily: "JetBrains Mono, monospace",
-                                  minHeight: 22,
+                                  fontFamily: "JetBrains Mono, monospace", minHeight: 22,
                                 }}
                               >
                                 <span className="chev is-leaf"></span>
                                 <span className="label">Connect as…</span>
-                                <span className="meta" style={{ color: "var(--fg-faint)" }}>{cl.users.length} users</span>
+                                <span className="meta" style={{ color: "var(--fg-faint)" }}>
+                                  {(cl.users || []).length} users
+                                </span>
                               </div>
-                              {cl.users.map(u => (
+                              {(cl.users || []).map(u => (
                                 <div
                                   key={u.name}
                                   className="tree-row"
@@ -265,7 +270,7 @@ function Sidebar({
                                   <span className="glyph"><Icon name="key" size={12} /></span>
                                   <span className="label">{highlight(u.name, query)}</span>
                                   <span className="meta" style={{ color: u.role === "superuser" ? "var(--accent)" : "var(--fg-mute)" }}>
-                                    {u.role}
+                                    {u.role || "user"}
                                   </span>
                                 </div>
                               ))}
@@ -279,8 +284,7 @@ function Sidebar({
                                   paddingLeft: 6 + 3 * 14,
                                   fontFamily: "JetBrains Mono, monospace",
                                   fontSize: 11, minHeight: 22,
-                                  color: "var(--fg-dim)",
-                                  cursor: "default",
+                                  color: "var(--fg-dim)", cursor: "default",
                                 }}
                               >
                                 <span className="chev is-leaf"></span>
@@ -289,7 +293,7 @@ function Sidebar({
                                   <span style={{ color: "var(--fg-mute)" }}>as</span>
                                   <span style={{ color: "var(--fg)" }}>{user.name}</span>
                                   <span style={{ color: user.role === "superuser" ? "var(--accent)" : "var(--fg-mute)", fontSize: 10 }}>
-                                    {user.role}
+                                    {user.role || "user"}
                                   </span>
                                 </span>
                                 <button
@@ -310,7 +314,7 @@ function Sidebar({
                               {availableDbs.length === 0 && (
                                 <div className="tree-row" style={{ paddingLeft: 6 + 4 * 14, color: "var(--fg-faint)", fontStyle: "italic", cursor: "default" }}>
                                   <span className="chev is-leaf"></span>
-                                  <span className="label">no databases granted</span>
+                                  <span className="label">no databases available</span>
                                 </div>
                               )}
                               {availableDbs.map(dbName => {
@@ -322,9 +326,19 @@ function Sidebar({
                                     className={`tree-row${isHighlight ? " is-selected" : ""}`}
                                     style={{ paddingLeft: 6 + 4 * 14 }}
                                     onClick={() => onOpenSession({
-                                      context: cn, namespace: n.name,
-                                      cluster: cl.name, user: user.name, role: user.role,
-                                      db: dbName,
+                                      context:   cn,
+                                      namespace: n.name,
+                                      cluster:   cl.name,
+                                      user:      user.name,
+                                      role:      user.role || '',
+                                      secret:    user.secret || '',
+                                      db:        dbName,
+                                      phase:     cl.phase,
+                                      pgVersion: cl.pgVersion,
+                                      ready:     cl.ready,
+                                      instances: cl.instances,
+                                      users:     cl.users,
+                                      databases: cl.databases,
                                     })}
                                     title={`Open psql session as ${user.name} on ${dbName}`}
                                   >
@@ -342,7 +356,7 @@ function Sidebar({
                         </React.Fragment>
                       );
                     })}
-                    {nsOpen && n.clusters.length === 0 && (
+                    {nsOpen && (n.clusters || []).length === 0 && (
                       <div className="tree-row" style={{ paddingLeft: 6 + 2 * 14, color: "var(--fg-faint)", cursor: "default", fontStyle: "italic" }}>
                         <span className="chev is-leaf"></span>
                         <span className="label">no CNPG clusters</span>
@@ -359,7 +373,7 @@ function Sidebar({
       <div className="sidebar-foot">
         <span className="dot" style={{ width: 6, height: 6, borderRadius: 999, background: "var(--ok)", boxShadow: "0 0 0 2px oklch(0.78 0.18 152 / 0.18)" }} />
         <span>watching {totals.ctx} contexts</span>
-        <button className="refresh" onClick={() => {}}>
+        <button className="refresh" onClick={onRefresh}>
           <Icon name="refresh" size={12} /> refresh
         </button>
       </div>
