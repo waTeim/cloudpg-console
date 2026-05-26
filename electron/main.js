@@ -272,20 +272,33 @@ ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
   }
 });
 
+// Serialize all queries on a session through a promise chain. pg.Client
+// rejects concurrent client.query() calls (deprecated in pg@8, removed in 9)
+// and a single client also keeps BEGIN/COMMIT on the same connection so the
+// REPL's transaction semantics work.
+function chain(s, fn) {
+  const prev = s.queue || Promise.resolve();
+  const next = prev.then(fn, fn);
+  s.queue = next.catch(() => {});
+  return next;
+}
+
 ipcMain.handle('pg:query', async (_evt, sessionId, sql) => {
   const s = sessions.get(sessionId);
   if (!s) return { error: 'no session' };
-  try {
-    const res = await s.client.query(sql);
-    return {
-      command:  res.command,
-      rowCount: res.rowCount,
-      fields:   res.fields.map(f => ({ name: f.name, dataTypeID: f.dataTypeID })),
-      rows:     res.rows,
-    };
-  } catch (e) {
-    return { error: e.message, where: e.where, code: e.code };
-  }
+  return chain(s, async () => {
+    try {
+      const res = await s.client.query(sql);
+      return {
+        command:  res.command,
+        rowCount: res.rowCount,
+        fields:   res.fields.map(f => ({ name: f.name, dataTypeID: f.dataTypeID })),
+        rows:     res.rows,
+      };
+    } catch (e) {
+      return { error: e.message, where: e.where, code: e.code };
+    }
+  });
 });
 
 ipcMain.handle('pg:disconnect', async (_evt, sessionId) => {
