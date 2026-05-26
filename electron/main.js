@@ -2,6 +2,7 @@
 
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
+const os   = require('os');
 const net  = require('net');
 
 const k8s = require('@kubernetes/client-node');
@@ -45,16 +46,51 @@ app.on('window-all-closed', () => {
 // IPC handlers — kubernetes
 // ─────────────────────────────────────────────────────────────────
 
-function makeKc(contextName) {
+// Load the default kubeconfig but tolerate duplicate cluster/user/context
+// names across merged files (common when KUBECONFIG points at multiple files
+// from the same provider). First occurrence wins.
+function loadKubeconfigSafe() {
   const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
+  try { kc.loadFromDefault(); return kc; }
+  catch (e) { if (!/Duplicate/i.test(e.message)) throw e; }
+
+  const paths = (process.env.KUBECONFIG && process.env.KUBECONFIG.length
+                  ? process.env.KUBECONFIG
+                  : path.join(os.homedir(), '.kube', 'config')
+                ).split(path.delimiter).filter(Boolean);
+
+  const seenClusters = new Map();
+  const seenUsers    = new Map();
+  const seenContexts = new Map();
+  let currentContext = '';
+  for (const p of paths) {
+    try {
+      const tmp = new k8s.KubeConfig();
+      tmp.loadFromFile(p);
+      for (const c   of tmp.getClusters())  if (!seenClusters.has(c.name))   seenClusters.set(c.name, c);
+      for (const u   of tmp.getUsers())     if (!seenUsers.has(u.name))      seenUsers.set(u.name, u);
+      for (const ctx of tmp.getContexts())  if (!seenContexts.has(ctx.name)) seenContexts.set(ctx.name, ctx);
+      if (!currentContext) currentContext = tmp.getCurrentContext();
+    } catch (_) { /* skip unreadable files */ }
+  }
+  const merged = new k8s.KubeConfig();
+  merged.loadFromOptions({
+    clusters: [...seenClusters.values()],
+    users:    [...seenUsers.values()],
+    contexts: [...seenContexts.values()],
+    currentContext,
+  });
+  return merged;
+}
+
+function makeKc(contextName) {
+  const kc = loadKubeconfigSafe();
   if (contextName) kc.setCurrentContext(contextName);
   return kc;
 }
 
 ipcMain.handle('k8s:listContexts', async () => {
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
+  const kc = loadKubeconfigSafe();
   return kc.getContexts().map(c => ({
     name:      c.name,
     cluster:   c.cluster,

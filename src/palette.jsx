@@ -4,29 +4,34 @@
 
 const { useState: pUseState, useEffect: pUseEffect, useMemo: pUseMemo, useRef: pUseRef } = React;
 
-function flattenTargets(contexts) {
-  const ctxMap = contexts || {};
+function flattenTargets(clusters) {
+  const map = clusters || {};
   const out = [];
-  for (const [cn, c] of Object.entries(ctxMap)) {
-    for (const n of (c.namespaces || [])) {
+  for (const [kubeCluster, kc] of Object.entries(map)) {
+    for (const n of (kc.namespaces || [])) {
       for (const cl of (n.clusters || [])) {
         for (const u of (cl.users || [])) {
+          const ctxOpts = (u.contextNames && u.contextNames.length)
+            ? u.contextNames
+            : (cl.contextNames || n.contextNames || kc.contextNames || []);
           for (const db of (u.databases || cl.databases || [])) {
             out.push({
-              key: `${cn}::${n.name}::${cl.name}::${u.name}::${db}`,
-              context:    cn,
-              namespace:  n.name,
-              cluster:    cl.name,
-              user:       u.name,
-              role:       u.role || '',
-              secret:     u.secret || '',
+              key:            `${kubeCluster}::${n.name}::${cl.name}::${u.name}::${db}`,
+              kubeCluster,
+              context:        ctxOpts[0],   // concrete kube context for connecting
+              contextOptions: ctxOpts,
+              namespace:      n.name,
+              cluster:        cl.name,
+              user:           u.name,
+              role:           u.role || '',
+              secret:         u.secret || '',
               db,
-              phase:      cl.phase,
-              users:      cl.users,
-              databases:  cl.databases,
-              pgVersion:  cl.pgVersion,
-              ready:      cl.ready,
-              instances:  cl.instances,
+              phase:          cl.phase,
+              users:          cl.users,
+              databases:      cl.databases,
+              pgVersion:      cl.pgVersion,
+              ready:          cl.ready,
+              instances:      cl.instances,
             });
           }
         }
@@ -52,11 +57,11 @@ function fuzzy(query, target) {
 }
 
 const FACETS = [
-  { id: "context",   label: "ctx",  icon: "cluster" },
-  { id: "namespace", label: "ns",   icon: "ns" },
-  { id: "cluster",   label: "pg",   icon: "db" },
-  { id: "user",      label: "user", icon: "user" },
-  { id: "db",        label: "db",   icon: "db" },
+  { id: "kubeCluster", label: "k8s",  icon: "cluster" },
+  { id: "namespace",   label: "ns",   icon: "ns" },
+  { id: "cluster",     label: "pg",   icon: "db" },
+  { id: "user",        label: "user", icon: "user" },
+  { id: "db",          label: "db",   icon: "db" },
 ];
 
 function FacetChip({ facet, value, open, onOpen, onClear, options, onSelect, disabled }) {
@@ -170,7 +175,7 @@ function CommandPalette({ open, onClose, onPick, recents = [], contexts }) {
     }
     const scored = [];
     for (const t of filteredByFacets) {
-      const haystack = `${t.context} ${t.namespace} ${t.cluster} ${t.user} ${t.db} ${t.role}`;
+      const haystack = `${t.kubeCluster} ${t.namespace} ${t.cluster} ${t.user} ${t.db} ${t.role}`;
       const m = fuzzy(q, haystack);
       if (m) scored.push({ target: t, ...m });
     }
@@ -303,11 +308,19 @@ function CommandPalette({ open, onClose, onPick, recents = [], contexts }) {
                         <span className={`badge ${phaseVariant}`}><span className="dot" />{t.phase}</span>
                       </div>
                       <div className="sub">
-                        <span className="hit">{t.context}</span>
+                        <span className="hit">{t.kubeCluster}</span>
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
                         ns {t.namespace}
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
                         {t.role || "user"}
+                        {t.contextOptions && t.contextOptions.length > 1 && (
+                          <>
+                            <span style={{ color: "var(--fg-faint)" }}> · </span>
+                            <span title={t.contextOptions.join(', ')} style={{ color: "var(--accent)" }}>
+                              {t.contextOptions.length} ctx
+                            </span>
+                          </>
+                        )}
                         <span style={{ color: "var(--fg-faint)" }}> · </span>
                         pg {t.pgVersion}
                       </div>
@@ -335,7 +348,7 @@ function CommandPalette({ open, onClose, onPick, recents = [], contexts }) {
           <span><span className="key">↑↓</span> navigate</span>
           <span><span className="key">↵</span> open in tab</span>
           <span><span className="key">⌫</span> remove last filter</span>
-          <span style={{ marginLeft: "auto" }}>{allTargets.length} targets · {Object.keys(contexts || {}).length} contexts</span>
+          <span style={{ marginLeft: "auto" }}>{allTargets.length} targets · {Object.keys(contexts || {}).length} clusters</span>
         </div>
       </div>
     </div>

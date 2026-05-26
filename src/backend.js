@@ -57,53 +57,88 @@ window.PSQL_META = [
 // ---------- backend object ----------
 
 window.backend = {
-  // Load the full k8s/CNPG tree (contexts → namespaces → clusters → users)
-  // and return a CONTEXTS-shaped object compatible with all existing UI code.
+  // Load the full k8s/CNPG tree, grouped by *k8s cluster* (not kube context),
+  // so multiple contexts sharing the same cluster are unioned. Each level
+  // carries `contextNames` listing which kube contexts can reach it — used
+  // both to pick a working context at connect time and for UI disambiguation.
   async bootstrap() {
     const ctxList = await window.cloudpg.k8s.listContexts();
-    const contexts = {};
 
-    await Promise.allSettled(ctxList.map(async (ctx) => {
-      contexts[ctx.name] = {
-        cluster:    ctx.cluster,
-        user:       ctx.user,
-        server:     '',
-        region:     ctx.namespace || 'default',
-        namespaces: [],
-      };
+    // Group kube contexts by the k8s cluster they point at.
+    const byCluster = {};
+    for (const ctx of ctxList) {
+      const k = ctx.cluster || ctx.name;
+      (byCluster[k] ||= []).push(ctx);
+    }
 
-      try {
-        const nsNames = await window.cloudpg.k8s.listNamespaces(ctx.name);
-        const nsResults = await Promise.allSettled(nsNames.map(async (nsName) => {
-          try {
-            const clusters = await window.cloudpg.k8s.listCNPGClusters(ctx.name, nsName);
-            const clResults = await Promise.allSettled(clusters.map(async (cl) => {
-              try {
-                const users = await window.cloudpg.k8s.listCNPGUsers(ctx.name, nsName, cl.name);
-                return { ...cl, users };
-              } catch (_) {
-                return { ...cl, users: [] };
-              }
-            }));
-            return {
-              name: nsName,
-              clusters: clResults
-                .filter(r => r.status === 'fulfilled')
-                .map(r => r.value),
-            };
-          } catch (_) {
-            return { name: nsName, clusters: [] };
+    const clusters = {};
+
+    await Promise.allSettled(Object.entries(byCluster).map(async ([clusterName, ctxs]) => {
+      // Union of namespaces reachable from any context on this cluster.
+      const nsMap = new Map();  // nsName -> Set<contextName>
+      await Promise.allSettled(ctxs.map(async (ctx) => {
+        try {
+          const nsNames = await window.cloudpg.k8s.listNamespaces(ctx.name);
+          for (const n of nsNames) {
+            if (!nsMap.has(n)) nsMap.set(n, new Set());
+            nsMap.get(n).add(ctx.name);
           }
+        } catch (_) {}
+      }));
+
+      const namespaces = [];
+      await Promise.all([...nsMap.entries()].map(async ([nsName, ctxSet]) => {
+        // Union of CNPG clusters in this namespace across all qualifying contexts.
+        const cnpgMap = new Map();  // cnpgName -> { ...cnpg, userMap, contextNames }
+
+        await Promise.allSettled([...ctxSet].map(async (ctxName) => {
+          let cnpgClusters = [];
+          try {
+            cnpgClusters = await window.cloudpg.k8s.listCNPGClusters(ctxName, nsName);
+          } catch (_) { return; }
+
+          await Promise.allSettled(cnpgClusters.map(async (cl) => {
+            if (!cnpgMap.has(cl.name)) {
+              cnpgMap.set(cl.name, { ...cl, userMap: new Map(), contextNames: new Set() });
+            }
+            cnpgMap.get(cl.name).contextNames.add(ctxName);
+            try {
+              const users = await window.cloudpg.k8s.listCNPGUsers(ctxName, nsName, cl.name);
+              const slot  = cnpgMap.get(cl.name);
+              for (const u of users) {
+                if (!slot.userMap.has(u.name)) {
+                  slot.userMap.set(u.name, { ...u, contextNames: new Set() });
+                }
+                slot.userMap.get(u.name).contextNames.add(ctxName);
+              }
+            } catch (_) {}
+          }));
         }));
-        contexts[ctx.name].namespaces = nsResults
-          .filter(r => r.status === 'fulfilled')
-          .map(r => r.value);
-      } catch (_) {
-        // context reachable but namespace listing failed — leave namespaces empty
-      }
+
+        namespaces.push({
+          name:         nsName,
+          contextNames: [...ctxSet],
+          clusters:     [...cnpgMap.values()].map(({ userMap, contextNames, ...rest }) => ({
+            ...rest,
+            contextNames: [...contextNames],
+            users:        [...userMap.values()].map(u => ({
+              ...u,
+              contextNames: [...u.contextNames],
+            })),
+          })),
+        });
+      }));
+
+      namespaces.sort((a, b) => a.name.localeCompare(b.name));
+
+      clusters[clusterName] = {
+        name:         clusterName,
+        contextNames: ctxs.map(c => c.name),
+        namespaces,
+      };
     }));
 
-    return contexts;
+    return clusters;
   },
 
   // After a session is connected, introspect the database schema and

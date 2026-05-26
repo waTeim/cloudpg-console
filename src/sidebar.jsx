@@ -115,15 +115,16 @@ function Sidebar({
   };
 
   const totals = useMemo(() => {
-    let clusters = 0, ns = 0, ctx = 0;
+    let clusters = 0, ns = 0, kc = 0, ctx = 0;
     for (const c of Object.values(contexts || {})) {
-      ctx++;
+      kc++;
+      ctx += (c.contextNames || []).length;
       for (const n of (c.namespaces || [])) {
         ns++;
         clusters += (n.clusters || []).length;
       }
     }
-    return { clusters, ns, ctx };
+    return { clusters, ns, kc, ctx };
   }, [contexts]);
 
   const ctxEntries = Object.entries(contexts || {});
@@ -133,7 +134,7 @@ function Sidebar({
       <div className="sidebar-head">
         <Icon name="cluster" size={14} />
         <span className="title">Clusters</span>
-        <span className="pill">{totals.ctx} ctx · {totals.clusters} pg</span>
+        <span className="pill">{totals.kc} k8s · {totals.clusters} pg</span>
         <button
           title="Hide sidebar (⌘B)"
           onClick={onCollapse}
@@ -190,7 +191,11 @@ function Sidebar({
                 hasChildren
                 glyph={<Icon name="cluster" size={13} />}
                 label={highlight(cn, query)}
-                meta={c.region}
+                meta={
+                  (c.contextNames || []).length > 1
+                    ? `${c.contextNames.length} ctx`
+                    : (c.contextNames || [])[0]
+                }
                 onToggle={() => toggleSet(openCtx, cn, setOpenCtx)}
                 onClick={() => toggleSet(openCtx, cn, setOpenCtx)}
               />
@@ -254,26 +259,34 @@ function Sidebar({
                                   {(cl.users || []).length} users
                                 </span>
                               </div>
-                              {(cl.users || []).map(u => (
-                                <div
-                                  key={u.name}
-                                  className="tree-row"
-                                  style={{ paddingLeft: 6 + 3 * 14 }}
-                                  onClick={() => {
-                                    const next = new Map(selectedUser);
-                                    next.set(clKey, u.name);
-                                    setSelectedUser(next);
-                                  }}
-                                  title={`secret: ${u.secret}`}
-                                >
-                                  <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
-                                  <span className="glyph"><Icon name="key" size={12} /></span>
-                                  <span className="label">{highlight(u.name, query)}</span>
-                                  <span className="meta" style={{ color: u.role === "superuser" ? "var(--accent)" : "var(--fg-mute)" }}>
-                                    {u.role || "user"}
-                                  </span>
-                                </div>
-                              ))}
+                              {(cl.users || []).map(u => {
+                                const ctxs = u.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
+                                return (
+                                  <div
+                                    key={u.name}
+                                    className="tree-row"
+                                    style={{ paddingLeft: 6 + 3 * 14 }}
+                                    onClick={() => {
+                                      const next = new Map(selectedUser);
+                                      next.set(clKey, u.name);
+                                      setSelectedUser(next);
+                                    }}
+                                    title={`secret: ${u.secret}\nvia: ${ctxs.join(', ')}`}
+                                  >
+                                    <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
+                                    <span className="glyph"><Icon name="key" size={12} /></span>
+                                    <span className="label">{highlight(u.name, query)}</span>
+                                    {ctxs.length > 1 && (
+                                      <span className="meta" style={{ color: "var(--accent)", fontSize: 10 }}>
+                                        {ctxs.length} ctx
+                                      </span>
+                                    )}
+                                    <span className="meta" style={{ color: u.role === "superuser" ? "var(--accent)" : "var(--fg-mute)" }}>
+                                      {u.role || "user"}
+                                    </span>
+                                  </div>
+                                );
+                              })}
                             </>
                           )}
                           {clOpen && user && (
@@ -320,27 +333,30 @@ function Sidebar({
                               {availableDbs.map(dbName => {
                                 const isHighlight = highlightKey ===
                                   `${cn}::${n.name}::${cl.name}::${user.name}::${dbName}`;
+                                const userCtxs = user.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
                                 return (
                                   <div
                                     key={dbName}
                                     className={`tree-row${isHighlight ? " is-selected" : ""}`}
                                     style={{ paddingLeft: 6 + 4 * 14 }}
                                     onClick={() => onOpenSession({
-                                      context:   cn,
-                                      namespace: n.name,
-                                      cluster:   cl.name,
-                                      user:      user.name,
-                                      role:      user.role || '',
-                                      secret:    user.secret || '',
-                                      db:        dbName,
-                                      phase:     cl.phase,
-                                      pgVersion: cl.pgVersion,
-                                      ready:     cl.ready,
-                                      instances: cl.instances,
-                                      users:     cl.users,
-                                      databases: cl.databases,
+                                      kubeCluster:    cn,
+                                      context:        userCtxs[0],
+                                      contextOptions: userCtxs,
+                                      namespace:      n.name,
+                                      cluster:        cl.name,
+                                      user:           user.name,
+                                      role:           user.role || '',
+                                      secret:         user.secret || '',
+                                      db:             dbName,
+                                      phase:          cl.phase,
+                                      pgVersion:      cl.pgVersion,
+                                      ready:          cl.ready,
+                                      instances:      cl.instances,
+                                      users:          cl.users,
+                                      databases:      cl.databases,
                                     })}
-                                    title={`Open psql session as ${user.name} on ${dbName}`}
+                                    title={`Open psql session as ${user.name} on ${dbName} (via ${userCtxs[0] || 'default'})`}
                                   >
                                     <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
                                     <span className="glyph"><Icon name="db" size={12} /></span>
@@ -372,7 +388,7 @@ function Sidebar({
 
       <div className="sidebar-foot">
         <span className="dot" style={{ width: 6, height: 6, borderRadius: 999, background: "var(--ok)", boxShadow: "0 0 0 2px oklch(0.78 0.18 152 / 0.18)" }} />
-        <span>watching {totals.ctx} contexts</span>
+        <span>watching {totals.kc} clusters · {totals.ctx} contexts</span>
         <button className="refresh" onClick={onRefresh}>
           <Icon name="refresh" size={12} /> refresh
         </button>

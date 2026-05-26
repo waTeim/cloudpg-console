@@ -100,7 +100,7 @@ function Tabbar({ tabs, activeId, onActivate, onClose, onNew }) {
             key={t.id}
             className={`tab${t.id === activeId ? " is-active" : ""}`}
             onClick={() => onActivate(t.id)}
-            title={`${t.user}@${t.cluster}/${t.db}  ·  ${t.context} · ns ${t.namespace}`}
+            title={`${t.user}@${t.cluster}/${t.db}  ·  ${t.kubeCluster || t.context} · ns ${t.namespace}`}
           >
             <span className="tab-icon"><Icon name="db" size={12} /></span>
             <span className="tab-label">
@@ -128,9 +128,10 @@ function Tabbar({ tabs, activeId, onActivate, onClose, onNew }) {
 
 function Breadcrumb({ tab }) {
   const phaseVariant = window.PHASE_VARIANT[tab.phase] || "warn";
+  const ctxList = tab.contextOptions || (tab.context ? [tab.context] : []);
   return (
     <div className="breadcrumb">
-      <span className="bc-user" title={`secret: cnpg-${tab.cluster}-user-${tab.user}`}>
+      <span className="bc-user" title={`secret: ${tab.secret || `cnpg-${tab.cluster}-user-${tab.user}`}`}>
         <Icon name="user" size={11} />
         <span className="lab">as</span>
         <span className="val">{tab.user}</span>
@@ -139,10 +140,13 @@ function Breadcrumb({ tab }) {
 
       <span className="bc-divider" />
 
-      <span className="bc-chip" title="Kubernetes context">
+      <span className="bc-chip" title={`k8s cluster${ctxList.length ? `\nvia: ${ctxList.join(', ')}` : ''}`}>
         <Icon name="cluster" size={11} />
-        <span className="lab">ctx</span>
-        <span className="val">{tab.context}</span>
+        <span className="lab">k8s</span>
+        <span className="val">{tab.kubeCluster || tab.context}</span>
+        {ctxList.length > 1 && (
+          <span className="role" style={{ color: "var(--accent)" }}>{ctxList.length} ctx</span>
+        )}
       </span>
       <span className="bc-sep">/</span>
       <span className="bc-chip" title="Namespace">
@@ -178,7 +182,7 @@ function Statusbar({ tab, tabs }) {
       <span className="item"><span className="dot" /> <b>Idle</b></span>
       {tab && (
         <>
-          <span className="item">ctx <b>{tab.context}</b></span>
+          <span className="item">k8s <b>{tab.kubeCluster || tab.context}</b></span>
           <span className="item">ns <b>{tab.namespace}</b></span>
           <span className="item">db <b>{tab.db}</b></span>
           <span className="item">user <b>{tab.user}</b></span>
@@ -230,7 +234,7 @@ function EmptyState({ onOpenPalette, onPick, recents, contexts }) {
               <div key={t.key} className="row" onClick={() => onPick(t)}>
                 <Icon name="db" size={13} />
                 <span className="path">
-                  <span className="ctx">{t.context}</span>
+                  <span className="ctx">{t.kubeCluster || t.context}</span>
                   <span className="sep">/</span>{t.namespace}
                   <span className="sep">/</span>{t.cluster}
                   <span className="sep">/</span>{t.user}
@@ -313,7 +317,8 @@ function App() {
   updateTabRef.current = updateTabWithClose;
 
   const openSession = aUseCallback((target) => {
-    const key = `${target.context}::${target.namespace}::${target.cluster}::${target.user}::${target.db}`;
+    const kubeCluster = target.kubeCluster || target.context;
+    const key = `${kubeCluster}::${target.namespace}::${target.cluster}::${target.user}::${target.db}`;
 
     setTabs(prev => {
       const match = prev.find(p => p.key === key);
@@ -329,25 +334,28 @@ function App() {
 
       return [...prev, {
         id, key,
-        context:      target.context,
-        namespace:    target.namespace,
-        cluster:      target.cluster,
-        user:         target.user,
-        role:         target.role || '',
-        db:           target.db,
-        phase:        target.phase || 'Unknown',
-        pgVersion:    target.pgVersion || '?',
-        ready:        target.ready  ?? 0,
-        instances:    target.instances ?? 0,
-        allUsers:     target.users || [],
-        allDatabases: [target.db],
-        log:          [{ kind: 'welcome', text: 'Connecting…' }],
-        history:      [],
-        timing:       false,
+        kubeCluster,
+        context:        target.context,
+        contextOptions: target.contextOptions || (target.context ? [target.context] : []),
+        namespace:      target.namespace,
+        cluster:        target.cluster,
+        user:           target.user,
+        role:           target.role || '',
+        secret:         target.secret || '',
+        db:             target.db,
+        phase:          target.phase || 'Unknown',
+        pgVersion:      target.pgVersion || '?',
+        ready:          target.ready  ?? 0,
+        instances:      target.instances ?? 0,
+        allUsers:       target.users || [],
+        allDatabases:   [target.db],
+        log:            [{ kind: 'welcome', text: 'Connecting…' }],
+        history:        [],
+        timing:         false,
       }];
     });
 
-    pushRecent({ ...target, key });
+    pushRecent({ ...target, kubeCluster, key });
   }, [pushRecent]);
 
   // ⌘K / ⌘B / ⌘W / ⌘T keyboard shortcuts
