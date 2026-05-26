@@ -1,0 +1,56 @@
+{
+  "name": "cloudpg-console",
+  "version": "0.1.0",
+  "description": "Desktop psql interface for CloudNativePG (CNPG) clusters across kubernetes contexts.",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "package": "electron-builder",
+    "package:mac": "electron-builder --mac",
+    "package:linux": "electron-builder --linux",
+    "package:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "io.cloudpg.console",
+    "productName": "CloudPG Console",
+    "files": [
+      "CloudPG Console.html",
+      "styles.css",
+      "src/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^0.21.0",
+    "pg": "^8.13.0"
+  }
+}
