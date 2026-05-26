@@ -14,56 +14,67 @@ const RECENT_KEY  = "cloudpg.recents";
 const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280 };
 
 // Kick off a real postgres connect in the background after the tab is created.
+// Walks through every context that can reach this target (from the union
+// bootstrap) and uses the first one that successfully connects. This means a
+// context lacking pods/portforward RBAC silently falls back to a peer that
+// has it, instead of failing the whole target.
 async function doConnect(id, target, updateTabFn) {
-  try {
-    const secretName = target.secret || `cnpg-${target.cluster}-user-${target.user}`;
-    const credsRes = await window.cloudpg.k8s.readUserSecret(
-      target.context, target.namespace, secretName
-    );
-    if (!credsRes || !credsRes.ok) {
-      throw new Error(`could not read secret ${secretName} (via ${target.context}): ${credsRes?.error || 'unknown'}`);
+  const contexts = (target.contextOptions && target.contextOptions.length)
+    ? target.contextOptions
+    : [target.context].filter(Boolean);
+
+  const attempts = [];
+  for (const ctx of contexts) {
+    try {
+      const secretName = target.secret || `cnpg-${target.cluster}-user-${target.user}`;
+      const credsRes = await window.cloudpg.k8s.readUserSecret(ctx, target.namespace, secretName);
+      if (!credsRes || !credsRes.ok) {
+        attempts.push(`${ctx}: read secret — ${credsRes?.error || 'unknown'}`);
+        continue;
+      }
+      const creds = credsRes.data;
+
+      const result = await window.cloudpg.pg.connect(id, {
+        contextName: ctx,
+        namespace:   target.namespace,
+        clusterName: target.cluster,
+        user:        creds.username || target.user,
+        password:    creds.password,
+        database:    target.db,
+      });
+      if (!result.ok) {
+        attempts.push(`${ctx}: ${result.error}`);
+        continue;
+      }
+
+      const dbsRes = await window.cloudpg.pg.query(id,
+        "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname");
+      const allDatabases = dbsRes.rows ? dbsRes.rows.map(r => r.datname) : [target.db];
+      const pgVersion = (result.info?.server || '').match(/PostgreSQL\s+([\d.]+)/)?.[1]
+        || target.pgVersion || '?';
+
+      updateTabFn(id, {
+        connected:    true,
+        context:      ctx,
+        pgVersion,
+        allDatabases,
+        log: [
+          { kind: 'welcome', text: result.info?.server || 'Connected' },
+          { kind: 'welcome', text: `Connected to database "${target.db}" as "${creds.username || target.user}" via ${ctx}.` },
+          { kind: 'notice',  text: 'Type "\\?" for help.' },
+        ],
+      });
+      window.backend.introspect(id, target.db);
+      return;
+    } catch (err) {
+      attempts.push(`${ctx}: ${err.message || err}`);
     }
-    const creds = credsRes.data;
-
-    const result = await window.cloudpg.pg.connect(id, {
-      contextName: target.context,
-      namespace:   target.namespace,
-      clusterName: target.cluster,
-      user:        creds.username || target.user,
-      password:    creds.password,
-      database:    target.db,
-    });
-
-    if (!result.ok) throw new Error(result.error);
-
-    // List all accessible databases for \l and the sidebar's post-connect list.
-    const dbsRes = await window.cloudpg.pg.query(id,
-      "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname");
-    const allDatabases = dbsRes.rows ? dbsRes.rows.map(r => r.datname) : [target.db];
-
-    // Extract pg version from banner, e.g. "PostgreSQL 16.2 on …"
-    const pgVersion = (result.info?.server || '').match(/PostgreSQL\s+([\d.]+)/)?.[1]
-      || target.pgVersion || '?';
-
-    updateTabFn(id, {
-      connected:    true,
-      pgVersion,
-      allDatabases,
-      log: [
-        { kind: 'welcome', text: result.info?.server || 'Connected' },
-        { kind: 'welcome', text: `Connected to database "${target.db}" as "${creds.username || target.user}".` },
-        { kind: 'notice',  text: 'Type "\\?" for help.' },
-      ],
-    });
-
-    // Populate schema cache asynchronously (for \dt, autocomplete, etc.)
-    window.backend.introspect(id, target.db);
-
-  } catch (err) {
-    updateTabFn(id, {
-      log: [{ kind: 'error', text: String(err.message || err) }],
-    });
   }
+
+  const summary = contexts.length > 1
+    ? `Failed via all ${contexts.length} available contexts:\n  ${attempts.join('\n  ')}`
+    : (attempts[0] || 'no contexts available');
+  updateTabFn(id, { log: [{ kind: 'error', text: summary }] });
 }
 
 function Titlebar({ sidebarHidden, onToggleSidebar }) {

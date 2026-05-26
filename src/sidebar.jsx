@@ -60,10 +60,11 @@ function Sidebar({
   onRefresh,
 }) {
   const [query, setQuery] = useState("");
-  const [openCtx, setOpenCtx] = useState(() => new Set());
-  const [openNs,  setOpenNs]  = useState(() => new Set());
-  const [openCl,  setOpenCl]  = useState(() => new Set());
-  const [selectedUser, setSelectedUser] = useState(() => new Map());
+  const [openCtx,  setOpenCtx]  = useState(() => new Set());
+  const [openNs,   setOpenNs]   = useState(() => new Set());
+  const [openCl,   setOpenCl]   = useState(() => new Set());
+  const [openUser, setOpenUser] = useState(() => new Set());
+  const treeRef = useRef(null);
 
   const toggleSet = (set, key, setter) => {
     const next = new Set(set);
@@ -97,6 +98,30 @@ function Sidebar({
     setOpenNs(s => new Set([...s, ...ns]));
     setOpenCl(s => new Set([...s, ...cls]));
   }, [query]);
+
+  // Tab → sidebar sync: when a tab becomes active, expand every ancestor of
+  // its target row and scroll the row into view so the user can see where
+  // they are in the tree.
+  useEffect(() => {
+    if (!highlightKey) return;
+    const parts = highlightKey.split("::");
+    if (parts.length !== 5) return;
+    const [kc, ns, cl, u] = parts;
+    setOpenCtx (s => s.has(kc)                         ? s : new Set([...s, kc]));
+    setOpenNs  (s => s.has(`${kc}::${ns}`)             ? s : new Set([...s, `${kc}::${ns}`]));
+    setOpenCl  (s => s.has(`${kc}::${ns}::${cl}`)      ? s : new Set([...s, `${kc}::${ns}::${cl}`]));
+    setOpenUser(s => s.has(`${kc}::${ns}::${cl}::${u}`) ? s : new Set([...s, `${kc}::${ns}::${cl}::${u}`]));
+  }, [highlightKey]);
+
+  useEffect(() => {
+    if (!highlightKey) return;
+    // Wait a tick so the newly expanded rows are in the DOM.
+    const t = setTimeout(() => {
+      treeRef.current?.querySelector(".tree-row.is-selected")
+        ?.scrollIntoView({ block: "nearest" });
+    }, 0);
+    return () => clearTimeout(t);
+  }, [highlightKey]);
 
   // ----- resize -----
   const gripRef = useRef(null);
@@ -159,7 +184,7 @@ function Sidebar({
         {!query && <span className="kbd">/</span>}
       </div>
 
-      <div className="tree">
+      <div className="tree" ref={treeRef}>
         {ctxEntries.length === 0 && (
           <div className="tree-row" style={{ color: "var(--fg-mute)", fontStyle: "italic", cursor: "default", paddingLeft: 20 }}>
             <span className="label">Loading contexts…</span>
@@ -255,12 +280,6 @@ function Sidebar({
                     {nsOpen && clusters.map(cl => {
                       const clKey  = `${cn}::${n.name}::${cl.name}`;
                       const clOpen = openCl.has(clKey);
-                      const userName = selectedUser.get(clKey);
-                      const user     = userName ? (cl.users || []).find(u => u.name === userName) : null;
-                      // Use user.databases if present, else fall back to cluster.databases
-                      const availableDbs = user
-                        ? (user.databases || cl.databases || [])
-                        : [];
                       return (
                         <React.Fragment key={clKey}>
                           <TreeRow
@@ -274,7 +293,7 @@ function Sidebar({
                             onToggle={() => toggleSet(openCl, clKey, setOpenCl)}
                             onClick={() => toggleSet(openCl, clKey, setOpenCl)}
                           />
-                          {clOpen && !user && (
+                          {clOpen && (
                             <>
                               <div
                                 className="tree-row"
@@ -288,115 +307,72 @@ function Sidebar({
                                 <span className="chev is-leaf"></span>
                                 <span className="label">Connect as…</span>
                                 <span className="meta" style={{ color: "var(--fg-faint)" }}>
-                                  {(cl.users || []).length} users
+                                  {(cl.users || []).length} {(cl.users || []).length === 1 ? "user" : "users"}
                                 </span>
                               </div>
                               {(cl.users || []).map(u => {
-                                const ctxs = u.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
+                                const userKey  = `${clKey}::${u.name}`;
+                                const userOpen = openUser.has(userKey);
+                                const ctxs     = u.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
+                                const userDbs  = u.databases || cl.databases || [];
                                 return (
-                                  <div
-                                    key={u.name}
-                                    className="tree-row"
-                                    style={{ paddingLeft: 6 + 3 * 14 }}
-                                    onClick={() => {
-                                      const next = new Map(selectedUser);
-                                      next.set(clKey, u.name);
-                                      setSelectedUser(next);
-                                    }}
-                                    title={`secret: ${u.secret}\nvia: ${ctxs.join(', ')}`}
-                                  >
-                                    <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
-                                    <span className="glyph"><Icon name="key" size={12} /></span>
-                                    <span className="label">{highlight(u.name, query)}</span>
-                                    {ctxs.length > 1 && (
-                                      <span className="meta" style={{ color: "var(--accent)", fontSize: 10 }}>
-                                        {ctxs.length} ctx
-                                      </span>
+                                  <React.Fragment key={u.name}>
+                                    <TreeRow
+                                      depth={3}
+                                      open={userOpen}
+                                      hasChildren={userDbs.length > 0}
+                                      glyph={<Icon name="key" size={12} />}
+                                      label={highlight(u.name, query)}
+                                      meta={u.role || "user"}
+                                      secondary={ctxs.length > 1 ? (
+                                        <span style={{ color: "var(--accent)" }}>{ctxs.length} ctx</span>
+                                      ) : null}
+                                      onToggle={() => toggleSet(openUser, userKey, setOpenUser)}
+                                      onClick={() => toggleSet(openUser, userKey, setOpenUser)}
+                                    />
+                                    {userOpen && userDbs.length === 0 && (
+                                      <div className="tree-row" style={{ paddingLeft: 6 + 4 * 14, color: "var(--fg-faint)", fontStyle: "italic", cursor: "default" }}>
+                                        <span className="chev is-leaf"></span>
+                                        <span className="label">no databases available</span>
+                                      </div>
                                     )}
-                                    <span className="meta" style={{ color: u.role === "superuser" ? "var(--accent)" : "var(--fg-mute)" }}>
-                                      {u.role || "user"}
-                                    </span>
-                                  </div>
-                                );
-                              })}
-                            </>
-                          )}
-                          {clOpen && user && (
-                            <>
-                              <div
-                                className="tree-row"
-                                style={{
-                                  paddingLeft: 6 + 3 * 14,
-                                  fontFamily: "JetBrains Mono, monospace",
-                                  fontSize: 11, minHeight: 22,
-                                  color: "var(--fg-dim)", cursor: "default",
-                                }}
-                              >
-                                <span className="chev is-leaf"></span>
-                                <span className="glyph"><Icon name="user" size={12} /></span>
-                                <span className="label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                                  <span style={{ color: "var(--fg-mute)" }}>as</span>
-                                  <span style={{ color: "var(--fg)" }}>{user.name}</span>
-                                  <span style={{ color: user.role === "superuser" ? "var(--accent)" : "var(--fg-mute)", fontSize: 10 }}>
-                                    {user.role || "user"}
-                                  </span>
-                                </span>
-                                <button
-                                  onClick={() => {
-                                    const next = new Map(selectedUser);
-                                    next.delete(clKey);
-                                    setSelectedUser(next);
-                                  }}
-                                  style={{
-                                    color: "var(--fg-mute)", fontSize: 10,
-                                    fontFamily: "inherit",
-                                    background: "var(--bg-input)", border: "1px solid var(--line)",
-                                    padding: "1px 6px", borderRadius: 3,
-                                  }}
-                                  title="Change user"
-                                >change</button>
-                              </div>
-                              {availableDbs.length === 0 && (
-                                <div className="tree-row" style={{ paddingLeft: 6 + 4 * 14, color: "var(--fg-faint)", fontStyle: "italic", cursor: "default" }}>
-                                  <span className="chev is-leaf"></span>
-                                  <span className="label">no databases available</span>
-                                </div>
-                              )}
-                              {availableDbs.map(dbName => {
-                                const isHighlight = highlightKey ===
-                                  `${cn}::${n.name}::${cl.name}::${user.name}::${dbName}`;
-                                const userCtxs = user.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
-                                return (
-                                  <div
-                                    key={dbName}
-                                    className={`tree-row${isHighlight ? " is-selected" : ""}`}
-                                    style={{ paddingLeft: 6 + 4 * 14 }}
-                                    onClick={() => onOpenSession({
-                                      kubeCluster:    cn,
-                                      context:        userCtxs[0],
-                                      contextOptions: userCtxs,
-                                      namespace:      n.name,
-                                      cluster:        cl.name,
-                                      user:           user.name,
-                                      role:           user.role || '',
-                                      secret:         user.secret || '',
-                                      db:             dbName,
-                                      phase:          cl.phase,
-                                      pgVersion:      cl.pgVersion,
-                                      ready:          cl.ready,
-                                      instances:      cl.instances,
-                                      users:          cl.users,
-                                      databases:      cl.databases,
+                                    {userOpen && userDbs.map(dbName => {
+                                      const isHighlight = highlightKey ===
+                                        `${cn}::${n.name}::${cl.name}::${u.name}::${dbName}`;
+                                      return (
+                                        <div
+                                          key={dbName}
+                                          className={`tree-row${isHighlight ? " is-selected" : ""}`}
+                                          style={{ paddingLeft: 6 + 4 * 14 }}
+                                          onClick={() => onOpenSession({
+                                            kubeCluster:    cn,
+                                            context:        ctxs[0],
+                                            contextOptions: ctxs,
+                                            namespace:      n.name,
+                                            cluster:        cl.name,
+                                            user:           u.name,
+                                            role:           u.role || '',
+                                            secret:         u.secret || '',
+                                            db:             dbName,
+                                            phase:          cl.phase,
+                                            pgVersion:      cl.pgVersion,
+                                            ready:          cl.ready,
+                                            instances:      cl.instances,
+                                            users:          cl.users,
+                                            databases:      cl.databases,
+                                          })}
+                                          title={`Open psql session as ${u.name} on ${dbName} (via ${ctxs[0] || 'default'})`}
+                                        >
+                                          <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
+                                          <span className="glyph"><Icon name="db" size={12} /></span>
+                                          <span className="label">{highlight(dbName, query)}</span>
+                                          <span className="meta" style={{ color: "var(--fg-faint)" }}>
+                                            {dbName === "postgres" || dbName === "template1" ? "system" : "db"}
+                                          </span>
+                                        </div>
+                                      );
                                     })}
-                                    title={`Open psql session as ${user.name} on ${dbName} (via ${userCtxs[0] || 'default'})`}
-                                  >
-                                    <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
-                                    <span className="glyph"><Icon name="db" size={12} /></span>
-                                    <span className="label">{highlight(dbName, query)}</span>
-                                    <span className="meta" style={{ color: "var(--fg-faint)" }}>
-                                      {dbName === "postgres" || dbName === "template1" ? "system" : "db"}
-                                    </span>
-                                  </div>
+                                  </React.Fragment>
                                 );
                               })}
                             </>

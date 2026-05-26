@@ -42,6 +42,12 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Safety net: a buggy library can still emit an unhandled 'error' (notably
+// the k8s port-forward WebSocket on RBAC denial). Catch it here so the
+// Electron process doesn't pop the "Uncaught Exception" dialog and die.
+process.on('uncaughtException',  (e) => console.warn('[uncaughtException]',  e?.message || e));
+process.on('unhandledRejection', (e) => console.warn('[unhandledRejection]', e?.message || e));
+
 // ─────────────────────────────────────────────────────────────────
 // IPC handlers — kubernetes
 // ─────────────────────────────────────────────────────────────────
@@ -180,8 +186,25 @@ ipcMain.handle('k8s:readUserSecret', envelope(async (_evt, contextName, namespac
 
 const sessions = new Map();
 
+// Ask the API server whether the current context is allowed to create a
+// pods/portforward in the namespace. Detects RBAC denial *before* we open
+// a WebSocket the server will 403, avoiding the unhandled-error crash.
+async function canPortForward(kc, namespace) {
+  try {
+    const api = kc.makeApiClient(k8s.AuthorizationV1Api);
+    const res = await api.createSelfSubjectAccessReview({
+      spec: { resourceAttributes: { namespace, verb: 'create', resource: 'pods', subresource: 'portforward' } },
+    });
+    return { allowed: !!res.body.status?.allowed, reason: res.body.status?.reason || '' };
+  } catch (e) {
+    // SSAR itself failed — proceed and let the actual operation report.
+    return { allowed: true, reason: '(ssar unavailable)' };
+  }
+}
+
 // Opens a local TCP server that port-forwards each connection to the
-// cluster's current primary pod on port 5432.
+// cluster's current primary pod on port 5432. Attaches defensive error
+// listeners so a transient WS failure can't take the main process down.
 async function openPortForward(kc, namespace, clusterName) {
   const pf         = new k8s.PortForward(kc);
   const customApi  = kc.makeApiClient(k8s.CustomObjectsApi);
@@ -193,9 +216,24 @@ async function openPortForward(kc, namespace, clusterName) {
   if (!podName) throw new Error(`No primary pod for cluster ${clusterName}`);
 
   const server = net.createServer((socket) => {
+    // Prevent unhandled 'error' from killing the process if pg.Client
+    // disconnects rudely or the WS folds underneath us.
+    socket.on('error', (e) => { console.warn('[pf socket]', friendlyErr(e)); });
     pf.portForward(namespace, podName, [5432], socket, null, socket)
-      .catch((err) => socket.destroy(err));
+      .then((ws) => {
+        if (ws && typeof ws.on === 'function') {
+          ws.on('error', (e) => {
+            console.warn('[pf ws]', friendlyErr(e));
+            try { socket.destroy(); } catch (_) {}
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn('[pf]', friendlyErr(err));
+        try { socket.destroy(); } catch (_) {}
+      });
   });
+  server.on('error', (e) => console.warn('[pf server]', friendlyErr(e)));
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -207,20 +245,30 @@ async function openPortForward(kc, namespace, clusterName) {
 
 ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
   const { contextName, namespace, clusterName, user, password, database } = opts;
+  let server;
   try {
     const kc = makeKc(contextName);
-    const { server, localPort } = await openPortForward(kc, namespace, clusterName);
+
+    const pfCheck = await canPortForward(kc, namespace);
+    if (!pfCheck.allowed) {
+      return { ok: false, error: `context "${contextName}" cannot port-forward in namespace "${namespace}"${pfCheck.reason ? ` (${pfCheck.reason})` : ''}` };
+    }
+
+    ({ server } = await openPortForward(kc, namespace, clusterName));
+    const localPort = server.address().port;
     const client = new Client({
       host: '127.0.0.1', port: localPort,
       user, password, database,
       ssl: false,
+      connectionTimeoutMillis: 10000,
     });
     await client.connect();
     sessions.set(sessionId, { client, server, localPort });
     const vr = await client.query('SELECT version()');
     return { ok: true, info: { server: vr.rows[0].version } };
   } catch (e) {
-    return { ok: false, error: e.message };
+    try { server?.close(); } catch (_) {}
+    return { ok: false, error: friendlyErr(e) };
   }
 });
 
