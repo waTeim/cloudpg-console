@@ -720,20 +720,23 @@ function Session({ tab, onUpdateTab }) {
       if (hist.length === 0) return;
       e.preventDefault();
       if (hIdx === -1) setHStash(buffer);
-      const next = Math.min(hist.length - 1, hIdx + 1);
+      const next     = Math.min(hist.length - 1, hIdx + 1);
+      const newBuf   = hist[next];
       setHIdx(next);
-      setBuffer(hist[next]);
-      queueMicrotask(() => taRef.current?.setSelectionRange(0, 0));
+      setBuffer(newBuf);
+      // Shell-style: cursor at end of the recalled command.
+      queueMicrotask(() => taRef.current?.setSelectionRange(newBuf.length, newBuf.length));
       return;
     }
     if (e.key === "ArrowDown" && atEnd) {
       const hist = tab.history || [];
       if (hIdx === -1) return;
       e.preventDefault();
-      const next = hIdx - 1;
+      const next   = hIdx - 1;
+      const newBuf = next === -1 ? hStash : hist[next];
       setHIdx(next);
-      if (next === -1) setBuffer(hStash);
-      else setBuffer(hist[next]);
+      setBuffer(newBuf);
+      queueMicrotask(() => taRef.current?.setSelectionRange(newBuf.length, newBuf.length));
       return;
     }
     // Cmd+L clear screen
