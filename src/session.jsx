@@ -68,6 +68,18 @@ function HighlightedInline({ src }) {
 }
 
 // ---------- Autocomplete suggestions ----------
+function commonPrefix(strings) {
+  if (strings.length === 0) return "";
+  let prefix = strings[0];
+  for (let i = 1; i < strings.length; i++) {
+    while (prefix && !strings[i].toLowerCase().startsWith(prefix.toLowerCase())) {
+      prefix = prefix.slice(0, -1);
+    }
+    if (!prefix) break;
+  }
+  return prefix;
+}
+
 function getAutocompleteSuggestions(text, caret, db) {
   let i = caret - 1;
   while (i >= 0 && /[a-zA-Z0-9_\\.]/.test(text[i])) i--;
@@ -75,10 +87,8 @@ function getAutocompleteSuggestions(text, caret, db) {
   const fragment = text.slice(start, caret);
   if (!fragment) return { fragment: "", items: [], start: caret };
 
-  const lc = fragment.toLowerCase();
-  const items = [];
-
   if (fragment.startsWith("\\")) {
+    const items = [];
     for (const m of window.PSQL_META) {
       if (m.cmd.startsWith(fragment))
         items.push({ kind: "meta", name: m.cmd, hint: m.desc });
@@ -87,10 +97,41 @@ function getAutocompleteSuggestions(text, caret, db) {
   }
 
   const schemas = window.SCHEMAS[db] || {};
+
+  // Schema-qualified name: "public.u" → look only inside the public schema
+  // for relations starting with "u", and the replacement range starts AFTER
+  // the dot so we don't re-type "public.".
+  const dot = fragment.indexOf(".");
+  if (dot >= 0) {
+    const schemaName = fragment.slice(0, dot);
+    const namePrefix = fragment.slice(dot + 1);
+    const lc = namePrefix.toLowerCase();
+    const items = [];
+    const sch  = schemas[schemaName];
+    if (sch) {
+      for (const t of sch.tables || []) {
+        if (t.name.toLowerCase().startsWith(lc))
+          items.push({ kind: "table", name: t.name, hint: `${schemaName} · ${(t.rows || 0).toLocaleString()} rows` });
+      }
+      for (const v of sch.views || []) {
+        if (v.toLowerCase().startsWith(lc))
+          items.push({ kind: "view", name: v, hint: schemaName });
+      }
+      for (const f of sch.functions || []) {
+        if (f.toLowerCase().startsWith(lc))
+          items.push({ kind: "func", name: f, hint: schemaName });
+      }
+    }
+    return { fragment: namePrefix, items, start: start + dot + 1 };
+  }
+
+  const lc = fragment.toLowerCase();
+  const items = [];
+
   for (const [schemaName, sch] of Object.entries(schemas)) {
     for (const t of sch.tables || []) {
       if (t.name.toLowerCase().startsWith(lc))
-        items.push({ kind: "table", name: t.name, hint: `${schemaName} · ${t.rows.toLocaleString()} rows` });
+        items.push({ kind: "table", name: t.name, hint: `${schemaName} · ${(t.rows || 0).toLocaleString()} rows` });
     }
     for (const v of sch.views || []) {
       if (v.toLowerCase().startsWith(lc))
@@ -113,6 +154,11 @@ function getAutocompleteSuggestions(text, caret, db) {
   for (const fn of window.SQL_FUNCTIONS)
     if (fn.startsWith(lc)) items.push({ kind: "fn", name: fn, hint: "function" });
 
+  // Dedup but DON'T truncate — the common-prefix calc in the Tab handler
+  // must see every match, otherwise it can resolve to a too-long prefix
+  // (e.g. cutting off "users" after a dozen "user_*" tables would yield
+  // "user_" instead of the correct "user"). The popup's CSS handles
+  // overflow with a scrollbar.
   const seen = new Set();
   const out = [];
   for (const it of items) {
@@ -120,7 +166,6 @@ function getAutocompleteSuggestions(text, caret, db) {
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(it);
-    if (out.length >= 12) break;
   }
   return { fragment, items: out, start };
 }
@@ -432,6 +477,7 @@ function Session({ tab, onUpdateTab }) {
   const [hStash, setHStash] = sUseState("");  // stash buffer when entering history nav
   const [acState, setAcState] = sUseState({ open: false, items: [], idx: 0, start: 0 });
   const [acPlacement, setAcPlacement] = sUseState("above");  // "above" | "below"
+  const lastTabRef = sUseRef(0);
 
   const taRef = sUseRef(null);
   const logRef = sUseRef(null);
@@ -524,34 +570,29 @@ function Session({ tab, onUpdateTab }) {
     }
   };
 
-  // Autocomplete: place the popover above the prompt by default; flip
-  // below the prompt when the prompt is high in the viewport and the
-  // popup would be truncated by the scroll container's top edge.
+  // Autocomplete popup placement — above the prompt by default; flips below
+  // when the prompt is high in the viewport and the popup would be clipped.
   const POPUP_HEIGHT = 280;  // matches .ac-pop max-height in styles.css
 
-  const updateAC = (text, c) => {
-    const { fragment, items, start } = getAutocompleteSuggestions(text, c, tab.db);
-    if (items.length && fragment) {
-      setAcState({ open: true, items, idx: 0, start });
-      const ta = taRef.current, log = logRef.current;
-      if (ta && log) {
-        const tr = ta.getBoundingClientRect();
-        const lr = log.getBoundingClientRect();
-        const spaceAbove = tr.top - lr.top;
-        const spaceBelow = lr.bottom - tr.bottom;
-        setAcPlacement(spaceAbove < POPUP_HEIGHT && spaceBelow > spaceAbove ? "below" : "above");
-      }
-    } else {
-      setAcState(s => ({ ...s, open: false }));
-    }
+  const placeAC = () => {
+    const ta = taRef.current, log = logRef.current;
+    if (!ta || !log) return;
+    const tr = ta.getBoundingClientRect();
+    const lr = log.getBoundingClientRect();
+    const spaceAbove = tr.top - lr.top;
+    const spaceBelow = lr.bottom - tr.bottom;
+    setAcPlacement(spaceAbove < POPUP_HEIGHT && spaceBelow > spaceAbove ? "below" : "above");
   };
 
-  const accept = (item) => {
+  // Insert `item` into the buffer, replacing the autocomplete fragment that
+  // begins at `start`. Used both when the popup is open (start = acState.start)
+  // and when Tab silently completes a single match.
+  const acceptAt = (item, start) => {
     const ta = taRef.current; if (!ta) return;
-    const before = buffer.slice(0, acState.start);
-    const after = buffer.slice(ta.selectionEnd);
+    const before = buffer.slice(0, start);
+    const after  = buffer.slice(ta.selectionEnd);
     const insert = item.name + (item.kind === "fn" || item.kind === "func" ? "(" : "");
-    const next = before + insert + after;
+    const next   = before + insert + after;
     setBuffer(next);
     const newCaret = before.length + insert.length;
     setAcState(s => ({ ...s, open: false }));
@@ -560,18 +601,19 @@ function Session({ tab, onUpdateTab }) {
       ta.setSelectionRange(newCaret, newCaret);
     });
   };
+  const accept = (item) => acceptAt(item, acState.start);
 
   const onChange = (e) => {
-    const v = e.target.value;
-    setBuffer(v);
+    setBuffer(e.target.value);
     setHIdx(-1);
-    const c = e.target.selectionStart;
-    updateAC(v, c);
+    // Typing means the user is composing; if a popup is open from a
+    // previous double-tab, dismiss it so they can keep editing freely.
+    if (acState.open) setAcState(s => ({ ...s, open: false }));
   };
 
   const onKeyDown = (e) => {
-    // Autocomplete navigation. Tab is the ONLY key that accepts a suggestion;
-    // Enter always submits the literal command. Escape closes the popup.
+    // Autocomplete navigation (only when popup is open). Tab accepts the
+    // highlighted item; Enter closes and falls through to submit.
     if (acState.open) {
       if (e.key === "ArrowDown") { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx + 1) % s.items.length })); return; }
       if (e.key === "ArrowUp")   { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx - 1 + s.items.length) % s.items.length })); return; }
@@ -579,11 +621,47 @@ function Session({ tab, onUpdateTab }) {
       if (e.key === "Escape")    { e.preventDefault(); setAcState(s => ({ ...s, open: false })); return; }
       if (e.key === "Enter")     { setAcState(s => ({ ...s, open: false })); /* fall through to Enter handler */ }
     }
-    // Tab: trigger autocomplete or insert spaces
+
+    // Tab (popup closed): bash-style completion.
+    //   1 match            → complete silently
+    //   N matches, prefix  → extend to longest common prefix
+    //   N matches, no ext. → first Tab does nothing; second Tab (<500ms) shows popup
     if (e.key === "Tab") {
       e.preventDefault();
       const c = e.currentTarget.selectionStart;
-      updateAC(buffer, c);
+      const { fragment, items, start } = getAutocompleteSuggestions(buffer, c, tab.db);
+
+      if (items.length === 0) { lastTabRef.current = Date.now(); return; }
+
+      if (items.length === 1) {
+        acceptAt(items[0], start);
+        lastTabRef.current = 0;
+        return;
+      }
+
+      const now = Date.now();
+      const isDoubleTab = now - lastTabRef.current < 500;
+      lastTabRef.current = now;
+
+      const cp = commonPrefix(items.map(i => i.name));
+      if (cp.length > fragment.length) {
+        const before = buffer.slice(0, start);
+        const after  = buffer.slice(c);
+        setBuffer(before + cp + after);
+        const newCaret = before.length + cp.length;
+        queueMicrotask(() => {
+          const ta = taRef.current;
+          ta?.focus();
+          ta?.setSelectionRange(newCaret, newCaret);
+        });
+        return;
+      }
+
+      if (isDoubleTab) {
+        setAcState({ open: true, items, idx: 0, start });
+        placeAC();
+      }
+      // single tab with no extension possible → silently armed for next tab
       return;
     }
     // Enter to submit (Shift+Enter = newline; meta-command starting with \ submits immediately)
