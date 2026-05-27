@@ -85,6 +85,7 @@ function Sidebar({
   onOpenSession,
   highlightKey,
   onRefresh,
+  hideEmptyNs = true,
 }) {
   const [query, setQuery] = useState("");
   const [openCtx,  setOpenCtx]  = useState(() => new Set());
@@ -305,7 +306,9 @@ function Sidebar({
         {ctxEntries.map(([cn, c]) => {
           if (!showK(cn)) return null;
           const ctxOpen = openCtx.has(cn);
-          const nsList  = (c.namespaces || []).filter(n => showN(cn, n.name));
+          const nsList  = (c.namespaces || [])
+            .filter(n => !hideEmptyNs || (n.clusters || []).length > 0)
+            .filter(n => showN(cn, n.name));
           return (
             <React.Fragment key={cn}>
               <TreeRow

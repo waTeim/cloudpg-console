@@ -11,7 +11,7 @@ const {
 } = React;
 
 const RECENT_KEY  = "cloudpg.recents";
-const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280 };
+const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280, hideEmptyNs: true };
 
 // Kick off a real postgres connect in the background after the tab is created.
 // Walks through every context that can reach this target (from the union
@@ -435,6 +435,7 @@ function App() {
           onOpenSession={openSession}
           highlightKey={activeTab ? activeTab.key : null}
           onRefresh={loadContexts}
+          hideEmptyNs={t.hideEmptyNs ?? true}
         />
 
         <div className="main">
@@ -495,6 +496,11 @@ function App() {
           value={t.sidebarWidth}
           min={220} max={480} step={10} unit="px"
           onChange={(v) => { setTweak("sidebarWidth", v); setSidebarWidth(v); }}
+        />
+        <TweakToggle
+          label="Hide empty namespaces"
+          value={t.hideEmptyNs ?? true}
+          onChange={(v) => setTweak("hideEmptyNs", v)}
         />
         <TweakButton
           label={sidebarHidden ? "Show sidebar" : "Hide sidebar"}
