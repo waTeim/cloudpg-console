@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Required for hardened-runtime Electron apps. JIT is what V8 needs;
+       unsigned-executable-memory + dyld-environment-variables are what
+       Electron's bundled helpers need. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- We make outbound network connections (k8s API, port-forwarded pg). -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+
+  <!-- We listen on a local TCP port to bridge pg.Client into the
+       port-forward stream. (server entitlement is needed for any
+       net.createServer() that binds to a local port.) -->
+  <key>com.apple.security.network.server</key>
+  <true/>
+
+  <!-- Read user's kubeconfig (~/.kube/config) and any files exec-auth
+       providers (aws, gcloud) might touch under $HOME. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+</dict>
+</plist>

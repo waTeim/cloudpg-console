@@ -34,22 +34,28 @@ IPC calls.
 
 ```sh
 make install      # npm install
-make dev          # launch the Electron app
+make dev          # build renderer, launch the Electron app
 ```
+
+`make dev` runs the renderer build first (~10ms with esbuild). The build
+compiles `src/*.jsx` → `out/*.js` (classic JSX transform, minified) and
+vendors React + ReactDOM production UMD into `vendor/`. The Electron
+renderer loads only local files — no network on launch.
 
 ## Common targets
 
-| Target                | What it does                              |
-|-----------------------|-------------------------------------------|
-| `make install`        | `npm install`                             |
-| `make dev`            | run with logging                          |
-| `make start`          | run                                       |
-| `make package`        | build installer for the current platform  |
-| `make package-mac`    | DMG + zip                                 |
-| `make package-linux`  | AppImage + .deb                           |
-| `make package-win`    | NSIS + portable                           |
-| `make clean`          | remove `dist/`                            |
-| `make distclean`      | remove `dist/` + `node_modules/`          |
+| Target                | What it does                                       |
+|-----------------------|----------------------------------------------------|
+| `make install`        | `npm install`                                      |
+| `make build`          | compile JSX → `out/`, vendor React → `vendor/`     |
+| `make dev`            | build then run with logging                        |
+| `make start`          | build then run                                     |
+| `make package`        | build then create installer for the current platform |
+| `make package-mac`    | DMG + zip                                          |
+| `make package-linux`  | AppImage + .deb                                    |
+| `make package-win`    | NSIS + portable                                    |
+| `make clean`          | remove `dist/`, `out/`, `vendor/`                  |
+| `make distclean`      | clean + `node_modules/`                            |
 
 Output of `make package` lands in `./dist`.
 
@@ -120,14 +126,38 @@ to showing under every user.
 - **Multiple kubeconfigs with duplicate cluster names.** `loadFromDefault`
   throws on collisions; `loadKubeconfigSafe()` in `main.js` falls back
   to per-file load with name-deduplication (first wins).
-- **CSP / remote scripts.** The HTML loads React + Babel from
-  `unpkg.com` for development convenience. Before packaging for end
-  users, either (a) vendor them into the repo or (b) use this
-  project's "Save as standalone HTML" output as the file Electron
-  loads.
-- **Code-signing.** `electron-builder` reads signing creds from env
-  (`CSC_LINK`, `CSC_KEY_PASSWORD` on mac/win); see their docs. No
-  signing config currently lives in `package.json`.
+- **Code-signing & notarization (macOS).** Scaffolding is in place but
+  inactive. When you're ready:
+  1. Get a Developer ID Application cert from Apple, export as `.p12`,
+     `export CSC_LINK=/path/to/cert.p12 CSC_KEY_PASSWORD='...'`.
+  2. Generate an app-specific password for your Apple ID at
+     <https://appleid.apple.com>, then `export APPLE_ID='you@…'
+     APPLE_APP_SPECIFIC_PASSWORD='xxxx-xxxx-xxxx-xxxx'
+     APPLE_TEAM_ID='XXXXXXXXXX'`.
+  3. In `package.json`, drop the `//` prefix from the four `mac.//…`
+     keys (`hardenedRuntime`, `entitlements`, `entitlementsInherit`,
+     `notarize`).
+  4. `make package-mac` will now sign and notarize.
+
+  The entitlements file is already at `build/entitlements.mac.plist`
+  (JIT, network client+server, environment vars for V8 + Electron
+  helpers). Don't add more entitlements than you need — notarization
+  reviews them.
+- **Code-signing (Windows).** Set `CSC_LINK` / `CSC_KEY_PASSWORD` to a
+  Windows codesigning cert (`.p12` or `.pfx`) and re-run
+  `make package-win`. EV cert avoids SmartScreen ramp-up.
+- **App icon.** No icon is configured, so `electron-builder` produces
+  installers with the default Electron logo. Drop a 512×512
+  `build/icon.png` and electron-builder auto-generates `.icns`/`.ico`
+  and the Linux variants. (The current branding gradient lives in
+  `styles.css` under `.brand .logo` if you want a starting point.)
+- **`make watch` (dev hot-reload).** `make dev` runs the build once
+  then launches Electron — edits to `src/*.jsx` require restarting.
+  esbuild has a watch mode that incrementally re-emits on change; add
+  a `build:watch` script (`esbuild ... --watch`) and a parallel
+  Electron `--enable-logging` invocation, plus an Electron-side
+  `webContents.reload()` triggered by a file watcher (or just use
+  `electron-reloader`).
 - **Titlebar min/max/close buttons (Linux/Windows).** The three
   `.os-provided` buttons in `<Titlebar>` (`src/app.jsx`) render but have
   no `onClick`. They're hidden on macOS (`[data-platform="darwin"]`
@@ -144,9 +174,9 @@ to showing under every user.
 
 ```
 .
-├── CloudPG Console.html      ← renderer entry point
+├── CloudPG Console.html      ← renderer entry point (loads out/ + vendor/)
 ├── styles.css
-├── src/
+├── src/                       source (committed)
 │   ├── app.jsx                top-level + tab/session orchestration
 │   ├── sidebar.jsx            kubernetes tree (k8s cluster → ns → pg → user → db)
 │   ├── session.jsx            psql REPL + result rendering
@@ -157,6 +187,12 @@ to showing under every user.
 ├── electron/
 │   ├── main.js                main process + IPC handlers
 │   └── preload.js             window.cloudpg bridge
+├── scripts/
+│   └── build.js               esbuild driver (JSX → JS, vendor React)
+├── build/                     electron-builder resource dir
+│   └── entitlements.mac.plist signing/notarization (currently inactive)
+├── out/                       generated, gitignored — compiled renderer JS
+├── vendor/                    generated, gitignored — React UMD bundles
 ├── package.json
 ├── Makefile
 └── TODO.md                    you are here
