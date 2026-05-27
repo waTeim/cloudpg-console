@@ -77,17 +77,9 @@ async function doConnect(id, target, updateTabFn) {
   updateTabFn(id, { log: [{ kind: 'error', text: summary }] });
 }
 
-function Titlebar({ sidebarHidden, onToggleSidebar }) {
+function Titlebar() {
   return (
     <div className="titlebar">
-      <button
-        title={sidebarHidden ? "Show sidebar (⌘B)" : "Hide sidebar (⌘B)"}
-        onClick={onToggleSidebar}
-        style={{ WebkitAppRegion: "no-drag", width: 28, height: 22, display: "grid", placeItems: "center", borderRadius: 4, color: "var(--fg-dim)" }}
-      >
-        <Icon name="sidebar" size={14} />
-      </button>
-
       <div className="brand">
         <span className="logo"><Icon name="logo" size={11} /></span>
         <span className="name">CloudPG <span>Console</span></span>
@@ -105,9 +97,18 @@ function Titlebar({ sidebarHidden, onToggleSidebar }) {
   );
 }
 
-function Tabbar({ tabs, activeId, onActivate, onClose, onNew }) {
+function Tabbar({ tabs, activeId, onActivate, onClose, onNew, sidebarHidden, onShowSidebar }) {
   return (
     <div className="tabbar">
+      {sidebarHidden && (
+        <button
+          className="tab-expand-sidebar"
+          onClick={onShowSidebar}
+          title="Show sidebar (⌘B)"
+        >
+          <Icon name="sidebar" size={14} />
+        </button>
+      )}
       <div className="tab-strip">
         {tabs.map(t => (
           <div
@@ -270,6 +271,28 @@ function App() {
     document.documentElement.setAttribute("data-theme", t.theme || "paper");
   }, [t.theme]);
 
+  // Tag the document with the host platform so CSS can leave room for the
+  // macOS traffic-light buttons in the titlebar. Also track window focus —
+  // the lights vanish when the window is inactive, so the title should
+  // slide back to the normal left padding to avoid looking off-center.
+  aUseEffect(() => {
+    const p = /Mac/i.test(navigator.platform) ? "darwin"
+            : /Win/i.test(navigator.platform) ? "win32"
+            : "linux";
+    document.documentElement.setAttribute("data-platform", p);
+
+    const setFocus = (v) => document.documentElement.setAttribute("data-focused", v ? "true" : "false");
+    setFocus(document.hasFocus());
+    const onFocus = () => setFocus(true);
+    const onBlur  = () => setFocus(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur",  onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur",  onBlur);
+    };
+  }, []);
+
   const [sidebarWidth, setSidebarWidth] = aUseState(t.sidebarWidth ?? 280);
   const [sidebarHidden, setSidebarHidden] = aUseState(false);
   aUseEffect(() => { setSidebarWidth(t.sidebarWidth ?? 280); }, [t.sidebarWidth]);
@@ -401,10 +424,7 @@ function App() {
 
   return (
     <>
-      <Titlebar
-        sidebarHidden={sidebarHidden}
-        onToggleSidebar={() => setSidebarHidden(h => !h)}
-      />
+      <Titlebar />
 
       <div className="app-body" data-sidebar={sidebarHidden ? "hidden" : "open"} style={{ "--sidebar-w": `${sidebarWidth}px` }}>
         <Sidebar
@@ -424,6 +444,8 @@ function App() {
             onActivate={setActiveId}
             onClose={closeTab}
             onNew={() => setPaletteOpen(true)}
+            sidebarHidden={sidebarHidden}
+            onShowSidebar={() => setSidebarHidden(false)}
           />
 
           {activeTab ? (

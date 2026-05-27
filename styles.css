@@ -112,6 +112,12 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
   gap: 12px;
   user-select: none;
 }
+/* Make room for the macOS traffic-light buttons so the brand and any
+   leading widget aren't tucked underneath them. When the window loses
+   focus, macOS hides the traffic lights — drop the extra padding so the
+   brand doesn't look stranded mid-bar. */
+[data-platform="darwin"][data-focused="true"] .titlebar { padding-left: 78px; }
+[data-platform="darwin"]                       .titlebar { transition: padding-left 120ms ease; }
 .titlebar .brand {
   display: flex; align-items: center; gap: 8px;
   font-weight: 600;
@@ -191,8 +197,12 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
   grid-template-columns: var(--sidebar-w, 280px) 1fr;
   min-height: 0;
 }
-.app-body[data-sidebar="hidden"] { grid-template-columns: 0 1fr; }
+/* When the sidebar is hidden, collapse to a single-column grid so the
+   main pane fills the freed space. (Two columns "0 1fr" + display:none
+   on .sidebar would auto-flow .main into the 0-width track instead.) */
+.app-body[data-sidebar="hidden"] { grid-template-columns: 1fr; }
 .app-body[data-sidebar="hidden"] .sidebar { display: none; }
+
 
 /* ---------- Sidebar ---------- */
 .sidebar {
@@ -482,6 +492,23 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
   flex: none;
 }
 .tab-new:hover { background: var(--bg-hover); color: var(--fg); }
+
+/* Sidebar-expand button: lives at the extreme left of the tabbar
+   (sibling of .tab-strip so it isn't pushed around by tabs) and is only
+   shown when the sidebar is collapsed. Accent paint marks it as the
+   obvious "get the sidebar back" affordance. */
+.tab-expand-sidebar {
+  -webkit-app-region: no-drag;
+  width: 32px; height: 28px;
+  margin: 0 6px 4px 8px;
+  display: grid; place-items: center;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  flex: none;
+  align-self: flex-end;
+}
+.tab-expand-sidebar:hover { filter: brightness(1.06); }
 
 .tabbar .tab-actions {
   display: flex; align-items: center; gap: 2px;
