@@ -477,7 +477,14 @@ function Session({ tab, onUpdateTab }) {
   const [hStash, setHStash] = sUseState("");  // stash buffer when entering history nav
   const [acState, setAcState] = sUseState({ open: false, items: [], idx: 0, start: 0 });
   const [acPlacement, setAcPlacement] = sUseState("above");  // "above" | "below"
+  const [acMaxH, setAcMaxH] = sUseState(280);                // px, computed at open
   const lastTabRef = sUseRef(0);
+  const acListRef  = sUseRef(null);
+  // Set true the moment a keyboard nav advances the selection; cleared by
+  // any real mousemove. Suppresses spurious mouseEnter events that fire
+  // when the list scrolls under a stationary cursor (which would otherwise
+  // snap the selection to whichever row drifts under the mouse).
+  const kbdNavRef  = sUseRef(false);
 
   const taRef = sUseRef(null);
   const logRef = sUseRef(null);
@@ -570,19 +577,44 @@ function Session({ tab, onUpdateTab }) {
     }
   };
 
-  // Autocomplete popup placement — above the prompt by default; flips below
-  // when the prompt is high in the viewport and the popup would be clipped.
-  const POPUP_HEIGHT = 280;  // matches .ac-pop max-height in styles.css
+  // Autocomplete popup placement. Pick whichever side of the prompt has more
+  // room inside the scrollable log, then size the popup to fit that room so
+  // it never gets clipped — instead it grows a scrollbar.
+  const AC_MARGIN = 12;       // visual breathing room from log edge
+  const AC_MIN_H  = 120;
+  const AC_MAX_H  = 420;
 
   const placeAC = () => {
     const ta = taRef.current, log = logRef.current;
     if (!ta || !log) return;
     const tr = ta.getBoundingClientRect();
     const lr = log.getBoundingClientRect();
-    const spaceAbove = tr.top - lr.top;
-    const spaceBelow = lr.bottom - tr.bottom;
-    setAcPlacement(spaceAbove < POPUP_HEIGHT && spaceBelow > spaceAbove ? "below" : "above");
+    const spaceAbove = tr.top    - lr.top    - AC_MARGIN;
+    const spaceBelow = lr.bottom - tr.bottom - AC_MARGIN;
+    const placement  = spaceAbove >= spaceBelow ? "above" : "below";
+    const room       = placement === "above" ? spaceAbove : spaceBelow;
+    setAcPlacement(placement);
+    setAcMaxH(Math.max(AC_MIN_H, Math.min(AC_MAX_H, room)));
   };
+
+  // Keep the active item visible as the user arrow-keys through a long
+  // list. Compute scroll position from the row's offsetTop within
+  // .ac-list (which is position: relative for this purpose) and write
+  // only to list.scrollTop — never call scrollIntoView, which would also
+  // scroll .repl-log underneath us. useLayoutEffect runs before paint so
+  // the user never sees an intermediate position.
+  useLayoutEffect(() => {
+    if (!acState.open) return;
+    const list = acListRef.current;
+    const row  = list?.children?.[acState.idx];
+    if (!list || !row) return;
+    const rowTop    = row.offsetTop;
+    const rowBottom = rowTop + row.offsetHeight;
+    const viewTop   = list.scrollTop;
+    const viewBot   = viewTop + list.clientHeight;
+    if (rowTop < viewTop)         list.scrollTop = rowTop;
+    else if (rowBottom > viewBot) list.scrollTop = rowBottom - list.clientHeight;
+  }, [acState.idx, acState.open]);
 
   // Insert `item` into the buffer, replacing the autocomplete fragment that
   // begins at `start`. Used both when the popup is open (start = acState.start)
@@ -615,8 +647,8 @@ function Session({ tab, onUpdateTab }) {
     // Autocomplete navigation (only when popup is open). Tab accepts the
     // highlighted item; Enter closes and falls through to submit.
     if (acState.open) {
-      if (e.key === "ArrowDown") { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx + 1) % s.items.length })); return; }
-      if (e.key === "ArrowUp")   { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx - 1 + s.items.length) % s.items.length })); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); kbdNavRef.current = true; setAcState(s => ({ ...s, idx: Math.min(s.items.length - 1, s.idx + 1) })); return; }
+      if (e.key === "ArrowUp")   { e.preventDefault(); kbdNavRef.current = true; setAcState(s => ({ ...s, idx: Math.max(0, s.idx - 1) })); return; }
       if (e.key === "Tab")       { e.preventDefault(); accept(acState.items[acState.idx]); return; }
       if (e.key === "Escape")    { e.preventDefault(); setAcState(s => ({ ...s, open: false })); return; }
       if (e.key === "Enter")     { setAcState(s => ({ ...s, open: false })); /* fall through to Enter handler */ }
@@ -786,23 +818,39 @@ function Session({ tab, onUpdateTab }) {
               placeholder={tab.log?.length ? "" : "Type SQL or a \\meta command. Enter to run · Shift+Enter for newline · Tab for autocomplete"}
             />
             {acState.open && (
-              <div className={`ac-pop ac-pop-${acPlacement}`}>
-                {acState.items.map((it, i) => (
-                  <div
-                    key={it.kind + it.name}
-                    className={`ac-item${i === acState.idx ? " is-active" : ""}`}
-                    onMouseDown={(e) => { e.preventDefault(); accept(it); }}
-                    onMouseEnter={() => setAcState(s => ({ ...s, idx: i }))}
-                  >
-                    <span className="kind">{it.kind}</span>
-                    <span className="name">{it.name}</span>
-                    {it.hint && <span className="hint">{it.hint}</span>}
-                  </div>
-                ))}
+              <div
+                className={`ac-pop ac-pop-${acPlacement}`}
+                style={{ maxHeight: acMaxH }}
+              >
+                <div
+                  className="ac-list"
+                  ref={acListRef}
+                  onMouseMove={() => { kbdNavRef.current = false; }}
+                >
+                  {acState.items.map((it, i) => (
+                    <div
+                      key={it.kind + it.name}
+                      className={`ac-item${i === acState.idx ? " is-active" : ""}`}
+                      onMouseDown={(e) => { e.preventDefault(); accept(it); }}
+                      onMouseEnter={() => {
+                        // Ignore mouseEnter that fires because the list
+                        // scrolled under a stationary cursor — only honor it
+                        // when the mouse has actually moved.
+                        if (kbdNavRef.current) return;
+                        setAcState(s => ({ ...s, idx: i }));
+                      }}
+                    >
+                      <span className="kind">{it.kind}</span>
+                      <span className="name">{it.name}</span>
+                      {it.hint && <span className="hint">{it.hint}</span>}
+                    </div>
+                  ))}
+                </div>
                 <div className="ac-foot">
                   <span><kbd>Tab</kbd> accept</span>
                   <span><kbd>↑↓</kbd> nav</span>
                   <span><kbd>Esc</kbd> close</span>
+                  <span style={{ marginLeft: "auto" }}>{acState.items.length}</span>
                 </div>
               </div>
             )}
