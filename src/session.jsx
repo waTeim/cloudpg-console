@@ -170,71 +170,6 @@ function getAutocompleteSuggestions(text, caret, db) {
   return { fragment, items: out, start };
 }
 
-// ---------- Mock query execution (same as before, db-aware) ----------
-function fakeRowFor(col, i, seed = 0) {
-  const t = col.type;
-  if (col.name === "id" && t === "uuid") {
-    const hex = (n) => n.toString(16).padStart(2, "0");
-    const s = (seed + i) * 2654435761 >>> 0;
-    const b = (n) => hex((s >> (n * 4)) & 0xff);
-    return `${b(0)}${b(1)}${b(2)}${b(3)}-${b(4)}${b(5)}-${b(6)}${b(7)}-89ab-${b(0)}${b(1)}${b(2)}${b(3)}${b(4)}${b(5)}`;
-  }
-  if (t === "uuid") {
-    const s = (seed * 31 + i * 7);
-    const hex = (n) => ((n * 1103515245 + 12345) >>> 0).toString(16).padStart(8, "0");
-    return `${hex(s).slice(0,8)}-${hex(s+1).slice(0,4)}-${hex(s+2).slice(0,4)}-${hex(s+3).slice(0,4)}-${hex(s+4).slice(0,12)}`;
-  }
-  if (col.name === "email" || t === "citext") {
-    const names = ["alice","bob","carol","dan","evelyn","frank","grace","hugo","iris","jules"];
-    const doms = ["acme.io","example.com","letters.co","ridge.dev"];
-    return `${names[(i + seed) % names.length]}${i+1}@${doms[i % doms.length]}`;
-  }
-  if (t === "text" || t === "varchar" || /char/.test(t)) {
-    if (col.name === "display_name") return ["Alice Reeves","Bob Tan","Carol Vega","Dan Ling","Evelyn Park","Frank Yu","Grace Owen","Hugo Park","Iris Cho","Jules Adler"][(i+seed)%10];
-    if (col.name === "country") return ["US","DE","FR","GB","JP","BR","CA","NL"][i % 8];
-    if (col.name === "currency") return ["USD","EUR","GBP","JPY"][i % 4];
-    if (col.name === "status") return ["paid","open","void","draft","past_due"][i % 5];
-    if (col.name === "plan") return ["starter","team","business","enterprise"][i % 4];
-    if (col.name === "sku") return `SKU-${(1000 + i * 7).toString().padStart(5,"0")}`;
-    if (col.name === "brand") return ["visa","mastercard","amex"][i % 3];
-    if (col.name === "last4") return String(1000 + (i * 137) % 9000).padStart(4,"0");
-    if (col.name === "name") return ["click","view","signup","purchase","logout"][i % 5];
-    if (col.name === "queue") return ["default","emails","webhooks","reports"][i % 4];
-    if (col.name === "host") return `worker-${i+1}.svc`;
-    if (col.name === "action") return ["login","logout","update","delete"][i % 4];
-    if (col.name === "actor") return ["alice@acme.io","bob@acme.io","carol@acme.io"][i % 3];
-    if (col.name === "key") return `feat.${["alpha","beta","gamma","delta"][i % 4]}_${i}`;
-    if (col.name === "title") return ["Ship CloudPG","Review PR #4012","Pair with Bob","Write changelog"][i % 4];
-    if (col.name === "source") return ["kafka","kinesis","webhook","s3"][i % 4];
-    if (col.name === "step") return ["land","signup","activate","convert"][i % 4];
-    if (col.name === "owner") return ["platform","payments","growth","ml"][i % 4];
-    return `value_${i+1}`;
-  }
-  if (t === "name") return ["postgres","app","readonly","template1"][i % 4];
-  if (t === "oid") return 16384 + i * 17;
-  if (t.startsWith("invoice_status")) return ["paid","open","void","draft"][i % 4];
-  if (t === "bool") return i % 3 === 0;
-  if (t === "int" || t === "integer" || t === "bigint" || t === "smallint" || t === "serial") {
-    if (col.name.endsWith("_cents")) return (1000 + (i * 311) % 90000);
-    if (col.name === "exp_month") return 1 + (i % 12);
-    if (col.name === "exp_year") return 2026 + (i % 5);
-    if (col.name === "quantity") return 1 + (i % 8);
-    if (col.name === "rows" || col.name === "users") return Math.floor(1000 + Math.random() * 100000);
-    return 1 + i;
-  }
-  if (t === "jsonb" || t === "json") return `{"k":"${["a","b","c","d"][i%4]}","n":${i+1}}`;
-  if (t === "pg_lsn") return `0/${(0x12340000 + i * 0x1000).toString(16).toUpperCase()}`;
-  if (t === "date") {
-    const d = new Date(Date.now() - i * 86400000);
-    return d.toISOString().slice(0, 10);
-  }
-  if (t === "timestamptz" || t === "timestamp") {
-    const d = new Date(Date.now() - i * 86400000 * 3);
-    return d.toISOString().replace("T", " ").replace("Z", "+00");
-  }
-  return "—";
-}
-
 function humanBytes(n) {
   const u = ["B","kB","MB","GB","TB"]; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
@@ -380,57 +315,6 @@ function execMeta(cmd, ctx) {
   return { kind: "error", message: `Invalid command \\${trimmed.slice(1)}. Try \\? for help.` };
 }
 
-function execSelect(sql, ctx) {
-  const schemas = window.SCHEMAS[ctx.db] || {};
-  const m = sql.match(/from\s+(?:(\w+)\.)?(\w+)/i);
-  if (!m) return { kind: "error", message: "syntax error at or near end of statement" };
-  const schemaName = m[1] || "public";
-  const tableName = m[2];
-  const sch = schemas[schemaName];
-  const table = sch && (sch.tables || []).find(t => t.name === tableName);
-  if (!table) return { kind: "error", message: `relation "${schemaName}.${tableName}" does not exist` };
-  const limM = sql.match(/limit\s+(\d+)/i);
-  const limit = limM ? Math.min(parseInt(limM[1], 10), 500) : Math.min(50, table.rows);
-  const cols = table.cols.map(c => ({ name: c.name, type: c.type, pk: c.pk }));
-  const seed = (tableName.length * 31 + ctx.db.length) >>> 0;
-  const rows = Array.from({ length: limit }, (_, i) => {
-    const r = {};
-    for (const c of table.cols) r[c.name] = fakeRowFor(c, i, seed);
-    return r;
-  });
-  return { kind: "table", cols, rows };
-}
-
-function execSql(sql, ctx) {
-  const trimmed = sql.trim().replace(/;\s*$/, "");
-  if (!trimmed) return { kind: "noop" };
-  if (trimmed.startsWith("\\")) return execMeta(trimmed, ctx);
-  if (/^select/i.test(trimmed)) return execSelect(trimmed, ctx);
-  if (/^explain/i.test(trimmed)) {
-    return { kind: "explain", lines: [
-      "                                  QUERY PLAN",
-      "----------------------------------------------------------------------------",
-      " Seq Scan on customers  (cost=0.00..18334.40 rows=184293 width=124)",
-      "   Filter: (created_at > '2024-01-01'::timestamptz)",
-      " Planning Time: 0.082 ms",
-      " Execution Time: 2.412 ms",
-      "(4 rows)",
-    ]};
-  }
-  if (/^(insert|update|delete)/i.test(trimmed)) {
-    const verb = trimmed.split(/\s/)[0].toUpperCase();
-    return { kind: "command", message: `${verb} 1` };
-  }
-  if (/^(begin|commit|rollback)/i.test(trimmed)) {
-    return { kind: "command", message: trimmed.toUpperCase() };
-  }
-  if (/^set\s/i.test(trimmed)) return { kind: "command", message: "SET" };
-  if (/^show\s/i.test(trimmed)) {
-    return { kind: "command", message: "—" };
-  }
-  return { kind: "error", message: `syntax error at or near "${trimmed.split(/\s/)[0]}"` };
-}
-
 // Decide whether the user's buffer is a "complete" statement to send.
 function isCompleteStatement(text) {
   const t = text.trim();
@@ -534,7 +418,7 @@ function Session({ tab, onUpdateTab }) {
 
     // Meta-commands (\ prefix) are handled client-side using the schema cache.
     if (sql.startsWith("\\")) {
-      const result = execSql(sql, ctx);
+      const result = execMeta(sql, ctx);
       if (result.kind === "quit") { onUpdateTab({ _close: true }); return; }
       const log = (tab.log || []).slice();
       log.push({ kind: "prompt", db: tab.db, text: sql });
