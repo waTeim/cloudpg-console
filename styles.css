@@ -829,14 +829,12 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 [data-theme="paper"] .tok-fn { color: oklch(0.55 0.16 60); }
 [data-theme="paper"] .tok-str { color: oklch(0.45 0.16 145); }
 
-/* Autocomplete popover — anchored directly above the prompt input so it
-   sits immediately above what you're typing, no matter where the prompt
-   is in the scroll viewport. */
+/* Autocomplete popover — anchored to the prompt input. Default is above
+   (out of the way of what you're typing); flips below when the prompt is
+   high in the viewport and the above placement would be clipped. */
 .ac-pop {
   position: absolute;
   left: 0;
-  bottom: 100%;
-  margin-bottom: 4px;
   z-index: 5;
   background: var(--bg-elevated);
   border: 1px solid var(--line-strong);
@@ -849,6 +847,8 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
   font-size: 12px;
   padding: 4px;
 }
+.ac-pop-above { bottom: 100%; margin-bottom: 4px; }
+.ac-pop-below { top: 100%;    margin-top: 4px; }
 .ac-foot {
   display: flex; gap: 12px;
   padding: 6px 8px 2px;

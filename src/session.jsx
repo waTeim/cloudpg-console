@@ -415,6 +415,7 @@ function Session({ tab, onUpdateTab }) {
   const [hIdx, setHIdx] = sUseState(-1);     // history navigation index
   const [hStash, setHStash] = sUseState("");  // stash buffer when entering history nav
   const [acState, setAcState] = sUseState({ open: false, items: [], idx: 0, start: 0 });
+  const [acPlacement, setAcPlacement] = sUseState("above");  // "above" | "below"
 
   const taRef = sUseRef(null);
   const logRef = sUseRef(null);
@@ -507,13 +508,26 @@ function Session({ tab, onUpdateTab }) {
     }
   };
 
-  // Autocomplete: the popover is positioned by CSS (anchored above the
-  // prompt input via `bottom: 100%`), so we only need to manage which items
-  // are visible.
+  // Autocomplete: place the popover above the prompt by default; flip
+  // below the prompt when the prompt is high in the viewport and the
+  // popup would be truncated by the scroll container's top edge.
+  const POPUP_HEIGHT = 280;  // matches .ac-pop max-height in styles.css
+
   const updateAC = (text, c) => {
     const { fragment, items, start } = getAutocompleteSuggestions(text, c, tab.db);
-    if (items.length && fragment) setAcState({ open: true, items, idx: 0, start });
-    else                          setAcState(s => ({ ...s, open: false }));
+    if (items.length && fragment) {
+      setAcState({ open: true, items, idx: 0, start });
+      const ta = taRef.current, log = logRef.current;
+      if (ta && log) {
+        const tr = ta.getBoundingClientRect();
+        const lr = log.getBoundingClientRect();
+        const spaceAbove = tr.top - lr.top;
+        const spaceBelow = lr.bottom - tr.bottom;
+        setAcPlacement(spaceAbove < POPUP_HEIGHT && spaceBelow > spaceAbove ? "below" : "above");
+      }
+    } else {
+      setAcState(s => ({ ...s, open: false }));
+    }
   };
 
   const accept = (item) => {
@@ -662,7 +676,7 @@ function Session({ tab, onUpdateTab }) {
               placeholder={tab.log?.length ? "" : "Type SQL or a \\meta command. Enter to run · Shift+Enter for newline · Tab for autocomplete"}
             />
             {acState.open && (
-              <div className="ac-pop">
+              <div className={`ac-pop ac-pop-${acPlacement}`}>
                 {acState.items.map((it, i) => (
                   <div
                     key={it.kind + it.name}
