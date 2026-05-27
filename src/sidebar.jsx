@@ -17,8 +17,28 @@ function highlight(label, query) {
   );
 }
 
-function PhaseBadge({ phase }) {
+// Compact 3-4 char labels for the sidebar where horizontal room is tight.
+// Full phase text is preserved in the title attribute (tooltip on hover).
+const PHASE_SHORT = {
+  "Healthy":                  "OK",
+  "Cluster in healthy state": "OK",
+  "Upgrading":                "UPG",
+  "Failing over":             "FAIL",
+  "Degraded":                 "DEG",
+  "Unknown":                  "?",
+};
+
+function PhaseBadge({ phase, compact = false }) {
   const variant = window.PHASE_VARIANT[phase] || "warn";
+  if (compact) {
+    const short = PHASE_SHORT[phase] || phase.slice(0, 4).toUpperCase();
+    return (
+      <span className={`badge ${variant}`} title={phase}>
+        <span className="dot" />
+        {short}
+      </span>
+    );
+  }
   return (
     <span className={`badge ${variant}`}>
       <span className="dot" />
@@ -222,16 +242,21 @@ function Sidebar({
                     : (c.contextNames || [])[0]
                 }
                 indicator={
-                  c.errors && Object.keys(c.errors).length > 0 && (
-                    <span
-                      className="badge warn"
-                      title={Object.entries(c.errors).map(([k, v]) => `${k}: ${v}`).join('\n')}
-                      style={{ cursor: 'help' }}
-                    >
-                      <span className="dot" />
-                      {Object.keys(c.errors).length === (c.contextNames || []).length ? "unreachable" : `${Object.keys(c.errors).length} err`}
-                    </span>
-                  )
+                  c.errors && Object.keys(c.errors).length > 0 && (() => {
+                    const failed = Object.keys(c.errors).length;
+                    const total  = (c.contextNames || []).length;
+                    const allDown = failed === total;
+                    return (
+                      <span
+                        className={`badge ${allDown ? "err" : "warn"}`}
+                        title={Object.entries(c.errors).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                        style={{ cursor: 'help' }}
+                      >
+                        <span className="dot" />
+                        {allDown ? "DOWN" : `${failed}!`}
+                      </span>
+                    );
+                  })()
                 }
                 onToggle={() => toggleSet(openCtx, cn, setOpenCtx)}
                 onClick={() => toggleSet(openCtx, cn, setOpenCtx)}
@@ -289,7 +314,7 @@ function Sidebar({
                             glyph={<Icon name="db" size={13} />}
                             label={highlight(cl.name, query)}
                             meta={`${cl.ready}/${cl.instances}`}
-                            indicator={<PhaseBadge phase={cl.phase} />}
+                            indicator={<PhaseBadge phase={cl.phase} compact />}
                             onToggle={() => toggleSet(openCl, clKey, setOpenCl)}
                             onClick={() => toggleSet(openCl, clKey, setOpenCl)}
                           />
