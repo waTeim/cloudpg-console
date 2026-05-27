@@ -10,8 +10,9 @@ contextBridge.exposeInMainWorld('cloudpg', {
   k8s: {
     listContexts:     ()                       => ipcRenderer.invoke('k8s:listContexts'),
     listNamespaces:   (ctx)                    => ipcRenderer.invoke('k8s:listNamespaces', ctx),
-    listCNPGClusters: (ctx, ns)                => ipcRenderer.invoke('k8s:listCNPGClusters', ctx, ns),
-    listCNPGUsers:    (ctx, ns, cluster)       => ipcRenderer.invoke('k8s:listCNPGUsers', ctx, ns, cluster),
+    listCNPGClusters:  (ctx, ns)               => ipcRenderer.invoke('k8s:listCNPGClusters', ctx, ns),
+    listCNPGDatabases: (ctx, ns)               => ipcRenderer.invoke('k8s:listCNPGDatabases', ctx, ns),
+    listCNPGUsers:     (ctx, ns, cluster)      => ipcRenderer.invoke('k8s:listCNPGUsers', ctx, ns, cluster),
     readUserSecret:   (ctx, ns, secretName)    => ipcRenderer.invoke('k8s:readUserSecret', ctx, ns, secretName),
   },
   pg: {

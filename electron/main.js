@@ -141,15 +141,37 @@ ipcMain.handle('k8s:listCNPGClusters', envelope(async (_evt, contextName, namesp
   const res = await api.listNamespacedCustomObject(
     'postgresql.cnpg.io', 'v1', namespace, 'clusters'
   );
-  return res.body.items.map(c => ({
-    name:       c.metadata.name,
-    phase:      c.status?.phase ?? 'Unknown',
-    ready:      c.status?.readyInstances ?? 0,
-    instances:  c.spec.instances,
-    pgVersion:  ((c.status?.image || c.spec?.imageName || '').split(':').pop().match(/^(\d+[\d.]*)/)?.[1] ?? '?'),
-    primary:    c.status?.currentPrimary,
-    databases:  [c.spec.bootstrap?.initdb?.database].filter(Boolean),
-  }));
+  return res.body.items.map(c => {
+    const initdb = c.spec?.bootstrap?.initdb;
+    return {
+      name:       c.metadata.name,
+      phase:      c.status?.phase ?? 'Unknown',
+      ready:      c.status?.readyInstances ?? 0,
+      instances:  c.spec.instances,
+      pgVersion:  ((c.status?.image || c.spec?.imageName || '').split(':').pop().match(/^(\d+[\d.]*)/)?.[1] ?? '?'),
+      primary:    c.status?.currentPrimary,
+      // Seed with the bootstrap database (if any). Database CRs are layered
+      // on top later in backend.js, and a matching CR will override the
+      // initdb owner with the post-bootstrap value.
+      databases:  initdb?.database ? [{ name: initdb.database, owner: initdb.owner || null }] : [],
+    };
+  });
+}));
+
+ipcMain.handle('k8s:listCNPGDatabases', envelope(async (_evt, contextName, namespace) => {
+  const kc  = makeKc(contextName);
+  const api = kc.makeApiClient(k8s.CustomObjectsApi);
+  const res = await api.listNamespacedCustomObject(
+    'postgresql.cnpg.io', 'v1', namespace, 'databases'
+  );
+  return res.body.items
+    .map(d => ({
+      name:    d.spec?.name,
+      owner:   d.spec?.owner || null,
+      cluster: d.spec?.cluster?.name,
+      applied: !!d.status?.applied,
+    }))
+    .filter(d => d.name && d.cluster && d.applied);
 }));
 
 ipcMain.handle('k8s:listCNPGUsers', envelope(async (_evt, contextName, namespace, clusterName) => {

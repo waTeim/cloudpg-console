@@ -97,19 +97,39 @@ window.backend = {
         const cnpgMap = new Map();  // cnpgName -> { ...cnpg, userMap, contextNames }
 
         await Promise.all([...ctxSet].map(async (ctxName) => {
-          const clRes = await window.cloudpg.k8s.listCNPGClusters(ctxName, nsName);
-          if (!clRes.ok) return;  // namespace-level access failure: just skip
+          // Fetch Clusters and Database CRs for the namespace in parallel;
+          // a Database CR points at its cluster via spec.cluster.name.
+          const [clRes, dbRes] = await Promise.all([
+            window.cloudpg.k8s.listCNPGClusters(ctxName, nsName),
+            window.cloudpg.k8s.listCNPGDatabases(ctxName, nsName),
+          ]);
+          if (!clRes.ok) return;
           const cnpgClusters = clRes.data;
+
+          const dbsByCluster = new Map();
+          if (dbRes.ok) {
+            for (const d of dbRes.data) {
+              if (!dbsByCluster.has(d.cluster)) dbsByCluster.set(d.cluster, []);
+              dbsByCluster.get(d.cluster).push({ name: d.name, owner: d.owner });
+            }
+          }
 
           await Promise.all(cnpgClusters.map(async (cl) => {
             if (!cnpgMap.has(cl.name)) {
               cnpgMap.set(cl.name, { ...cl, userMap: new Map(), contextNames: new Set() });
             }
-            cnpgMap.get(cl.name).contextNames.add(ctxName);
+            const slot = cnpgMap.get(cl.name);
+            slot.contextNames.add(ctxName);
+
+            // Merge in Database CRs. CR entries override the bootstrap
+            // initdb seed on name collision so the post-bootstrap owner
+            // (which actually matches a connectable role) wins.
+            const dbMap = new Map((slot.databases || []).map(d => [d.name, d]));
+            for (const d of (dbsByCluster.get(cl.name) || [])) dbMap.set(d.name, d);
+            slot.databases = [...dbMap.values()];
 
             const userRes = await window.cloudpg.k8s.listCNPGUsers(ctxName, nsName, cl.name);
             if (!userRes.ok) return;
-            const slot = cnpgMap.get(cl.name);
             for (const u of userRes.data) {
               if (!slot.userMap.has(u.name)) {
                 slot.userMap.set(u.name, { ...u, contextNames: new Set() });

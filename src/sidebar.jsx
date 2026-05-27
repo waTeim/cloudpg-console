@@ -314,7 +314,12 @@ function Sidebar({
                                 const userKey  = `${clKey}::${u.name}`;
                                 const userOpen = openUser.has(userKey);
                                 const ctxs     = u.contextNames || cl.contextNames || n.contextNames || c.contextNames || [];
-                                const userDbs  = u.databases || cl.databases || [];
+                                // Only this user's databases (from Database CR
+                                // owner). Untagged entries are shown to all
+                                // users as a fallback for legacy clusters.
+                                const userDbs  = (cl.databases || [])
+                                  .filter(d => !d.owner || d.owner === u.name)
+                                  .map(d => d.name);
                                 return (
                                   <React.Fragment key={u.name}>
                                     <TreeRow

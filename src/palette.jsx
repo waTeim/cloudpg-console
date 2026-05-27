@@ -14,18 +14,23 @@ function flattenTargets(clusters) {
           const ctxOpts = (u.contextNames && u.contextNames.length)
             ? u.contextNames
             : (cl.contextNames || n.contextNames || kc.contextNames || []);
-          for (const db of (u.databases || cl.databases || [])) {
+          // Only databases this user owns (Database CR's spec.owner). Untagged
+          // entries — older clusters with no CR — fall through to all users.
+          const userDbs = (cl.databases || []).filter(d =>
+            !d.owner || d.owner === u.name
+          );
+          for (const db of userDbs) {
             out.push({
-              key:            `${kubeCluster}::${n.name}::${cl.name}::${u.name}::${db}`,
+              key:            `${kubeCluster}::${n.name}::${cl.name}::${u.name}::${db.name}`,
               kubeCluster,
-              context:        ctxOpts[0],   // concrete kube context for connecting
+              context:        ctxOpts[0],
               contextOptions: ctxOpts,
               namespace:      n.name,
               cluster:        cl.name,
               user:           u.name,
               role:           u.role || '',
               secret:         u.secret || '',
-              db,
+              db:             db.name,
               phase:          cl.phase,
               users:          cl.users,
               databases:      cl.databases,

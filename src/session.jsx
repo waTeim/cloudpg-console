@@ -415,7 +415,6 @@ function Session({ tab, onUpdateTab }) {
   const [hIdx, setHIdx] = sUseState(-1);     // history navigation index
   const [hStash, setHStash] = sUseState("");  // stash buffer when entering history nav
   const [acState, setAcState] = sUseState({ open: false, items: [], idx: 0, start: 0 });
-  const [acPos, setAcPos] = sUseState({ left: 0, top: 0 });
 
   const taRef = sUseRef(null);
   const logRef = sUseRef(null);
@@ -508,41 +507,13 @@ function Session({ tab, onUpdateTab }) {
     }
   };
 
-  // Autocomplete: position popover above the textarea at the caret.
+  // Autocomplete: the popover is positioned by CSS (anchored above the
+  // prompt input via `bottom: 100%`), so we only need to manage which items
+  // are visible.
   const updateAC = (text, c) => {
     const { fragment, items, start } = getAutocompleteSuggestions(text, c, tab.db);
-    if (items.length && fragment) {
-      setAcState({ open: true, items, idx: 0, start });
-      // Position popover
-      const ta = taRef.current;
-      if (!ta) return;
-      const mirror = document.createElement("div");
-      const cs = getComputedStyle(ta);
-      for (const p of ["fontFamily","fontSize","fontWeight","lineHeight","letterSpacing","paddingTop","paddingLeft","paddingRight","paddingBottom","whiteSpace","tabSize","wordBreak","wordWrap"]) {
-        mirror.style[p] = cs[p];
-      }
-      mirror.style.position = "absolute";
-      mirror.style.visibility = "hidden";
-      mirror.style.whiteSpace = "pre-wrap";
-      mirror.style.width = ta.clientWidth + "px";
-      mirror.style.top = "0"; mirror.style.left = "0";
-      mirror.textContent = text.slice(0, start);
-      const marker = document.createElement("span");
-      marker.textContent = "x";
-      mirror.appendChild(marker);
-      document.body.appendChild(mirror);
-      const mRect = marker.getBoundingClientRect();
-      const taRect = ta.getBoundingClientRect();
-      const wRect = wrapRef.current.getBoundingClientRect();
-      document.body.removeChild(mirror);
-      setAcPos({
-        left: (taRect.left - wRect.left) + mRect.left,
-        // Popover above input
-        top: (taRect.top - wRect.top) + mRect.top - 4,
-      });
-    } else {
-      setAcState(s => ({ ...s, open: false }));
-    }
+    if (items.length && fragment) setAcState({ open: true, items, idx: 0, start });
+    else                          setAcState(s => ({ ...s, open: false }));
   };
 
   const accept = (item) => {
@@ -569,15 +540,14 @@ function Session({ tab, onUpdateTab }) {
   };
 
   const onKeyDown = (e) => {
-    // Autocomplete navigation
+    // Autocomplete navigation. Tab is the ONLY key that accepts a suggestion;
+    // Enter always submits the literal command. Escape closes the popup.
     if (acState.open) {
       if (e.key === "ArrowDown") { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx + 1) % s.items.length })); return; }
       if (e.key === "ArrowUp")   { e.preventDefault(); setAcState(s => ({ ...s, idx: (s.idx - 1 + s.items.length) % s.items.length })); return; }
       if (e.key === "Tab")       { e.preventDefault(); accept(acState.items[acState.idx]); return; }
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault(); accept(acState.items[acState.idx]); return;
-      }
       if (e.key === "Escape")    { e.preventDefault(); setAcState(s => ({ ...s, open: false })); return; }
+      if (e.key === "Enter")     { setAcState(s => ({ ...s, open: false })); /* fall through to Enter handler */ }
     }
     // Tab: trigger autocomplete or insert spaces
     if (e.key === "Tab") {
@@ -647,16 +617,13 @@ function Session({ tab, onUpdateTab }) {
           if (e.kind === "info")    return <div key={i} className="psql-line">{e.text}</div>;
           if (e.kind === "timing")  return <div key={i} className="psql-line dim">Time: {e.ms} ms</div>;
           if (e.kind === "prompt") {
-            // Multiline command shown with continuation prompts
             const lines = e.text.split("\n");
             return (
               <div key={i} className="psql-line cmd-echo">
                 {lines.map((ln, j) => (
                   <div key={j}>
                     <span className="prompt-prefix">
-                      {j === 0
-                        ? `${e.db}=>`
-                        : `${e.db}->`}
+                      {j === 0 ? `${e.db}=>` : `${e.db}->`}
                     </span>{" "}
                     <span><HighlightedInline src={ln} /></span>
                   </div>
@@ -667,59 +634,52 @@ function Session({ tab, onUpdateTab }) {
           if (e.kind === "result") return <ResultBlock key={i} result={e.result} />;
           return null;
         })}
-      </div>
 
-      <div className="repl-prompt">
-        <span className="prompt-prefix">{promptPrefix}</span>
-        <div className="prompt-input">
-          <pre className="prompt-hl" aria-hidden="true">
-            <HighlightedInline src={buffer} />
-            {"\n"}
-          </pre>
-          <textarea
-            ref={taRef}
-            value={buffer}
-            onChange={onChange}
-            onKeyDown={onKeyDown}
-            onClick={() => setAcState(s => ({ ...s, open: false }))}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            rows={Math.min(8, Math.max(1, buffer.split("\n").length))}
-            placeholder={tab.log?.length ? "" : "Type SQL or a \\meta command. Enter to run · Shift+Enter for newline · Tab for autocomplete"}
-          />
-        </div>
-      </div>
-
-      {acState.open && (
-        <div
-          className="ac-pop"
-          style={{
-            left: acPos.left,
-            // Anchor popover ABOVE the caret line; transform up by its own height
-            top: acPos.top,
-            transform: "translateY(-100%)",
-          }}
-        >
-          {acState.items.map((it, i) => (
-            <div
-              key={it.kind + it.name}
-              className={`ac-item${i === acState.idx ? " is-active" : ""}`}
-              onMouseDown={(e) => { e.preventDefault(); accept(it); }}
-              onMouseEnter={() => setAcState(s => ({ ...s, idx: i }))}
-            >
-              <span className="kind">{it.kind}</span>
-              <span className="name">{it.name}</span>
-              {it.hint && <span className="hint">{it.hint}</span>}
-            </div>
-          ))}
-          <div style={{ display: "flex", gap: 12, padding: "6px 8px 2px", borderTop: "1px solid var(--line)", marginTop: 4, fontSize: 10, color: "var(--fg-mute)", fontFamily: "JetBrains Mono, monospace" }}>
-            <span><kbd style={{ background: "var(--bg-active)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 3 }}>↑↓</kbd> nav</span>
-            <span><kbd style={{ background: "var(--bg-active)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 3 }}>Tab</kbd> accept</span>
-            <span><kbd style={{ background: "var(--bg-active)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 3 }}>Esc</kbd> close</span>
+        {/* The active prompt lives at the tail of the log so it sits
+            immediately after the last output line, like psql. */}
+        <div className="repl-prompt">
+          <span className="prompt-prefix">{promptPrefix}</span>
+          <div className="prompt-input">
+            <pre className="prompt-hl" aria-hidden="true">
+              <HighlightedInline src={buffer} />
+              {"\n"}
+            </pre>
+            <textarea
+              ref={taRef}
+              value={buffer}
+              onChange={onChange}
+              onKeyDown={onKeyDown}
+              onClick={() => setAcState(s => ({ ...s, open: false }))}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              rows={Math.min(8, Math.max(1, buffer.split("\n").length))}
+              placeholder={tab.log?.length ? "" : "Type SQL or a \\meta command. Enter to run · Shift+Enter for newline · Tab for autocomplete"}
+            />
+            {acState.open && (
+              <div className="ac-pop">
+                {acState.items.map((it, i) => (
+                  <div
+                    key={it.kind + it.name}
+                    className={`ac-item${i === acState.idx ? " is-active" : ""}`}
+                    onMouseDown={(e) => { e.preventDefault(); accept(it); }}
+                    onMouseEnter={() => setAcState(s => ({ ...s, idx: i }))}
+                  >
+                    <span className="kind">{it.kind}</span>
+                    <span className="name">{it.name}</span>
+                    {it.hint && <span className="hint">{it.hint}</span>}
+                  </div>
+                ))}
+                <div className="ac-foot">
+                  <span><kbd>Tab</kbd> accept</span>
+                  <span><kbd>↑↓</kbd> nav</span>
+                  <span><kbd>Esc</kbd> close</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

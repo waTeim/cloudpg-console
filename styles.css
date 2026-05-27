@@ -657,15 +657,14 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 .psql-table .t-row   { color: var(--fg); }
 .psql-table .t-foot  { color: var(--fg-mute); margin-top: 2px; }
 
-/* The prompt area at the bottom */
+/* The active prompt sits as the last item INSIDE .repl-log so it flows
+   directly after the last output line — psql-style — instead of being
+   pinned at the bottom of the viewport with whitespace above it. */
 .repl-prompt {
-  flex: none;
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 16px 14px;
-  background: var(--bg);
-  border-top: 1px solid transparent;
+  margin-top: 4px;
   position: relative;
 }
 .repl-prompt .prompt-prefix {
@@ -830,9 +829,14 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 [data-theme="paper"] .tok-fn { color: oklch(0.55 0.16 60); }
 [data-theme="paper"] .tok-str { color: oklch(0.45 0.16 145); }
 
-/* Autocomplete popover */
+/* Autocomplete popover — anchored directly above the prompt input so it
+   sits immediately above what you're typing, no matter where the prompt
+   is in the scroll viewport. */
 .ac-pop {
   position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 4px;
   z-index: 5;
   background: var(--bg-elevated);
   border: 1px solid var(--line-strong);
@@ -844,6 +848,21 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   padding: 4px;
+}
+.ac-foot {
+  display: flex; gap: 12px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--fg-mute);
+  font-family: "JetBrains Mono", monospace;
+}
+.ac-foot kbd {
+  background: var(--bg-active);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+  border-radius: 3px;
 }
 .ac-item {
   display: flex; align-items: center; gap: 8px;
