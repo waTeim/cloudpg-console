@@ -287,9 +287,17 @@ function execMeta(cmd, ctx) {
   }
   const dMatch = trimmed.match(/^\\d\+?\s+(\S+)$/);
   if (dMatch) {
-    const name = dMatch[1];
+    const arg = dMatch[1];
+    // Support schema-qualified names like "public.users". When the arg
+    // contains a dot, restrict the lookup to that schema; otherwise scan
+    // every schema (psql's search-path-like behavior).
+    const dot = arg.indexOf(".");
+    const wantSchema = dot >= 0 ? arg.slice(0, dot) : null;
+    const wantName   = dot >= 0 ? arg.slice(dot + 1) : arg;
+
     for (const [sn, s] of Object.entries(schemas)) {
-      const t = (s.tables || []).find(t => t.name === name);
+      if (wantSchema && sn !== wantSchema) continue;
+      const t = (s.tables || []).find(t => t.name === wantName);
       if (t) {
         return {
           kind: "table",
@@ -302,8 +310,16 @@ function execMeta(cmd, ctx) {
           title: `Table "${sn}.${t.name}"`,
         };
       }
+      if ((s.views || []).includes(wantName)) {
+        return {
+          kind: "table",
+          cols: [{name:"Column"},{name:"Type"}],
+          rows: [],
+          title: `View "${sn}.${wantName}" (column introspection not cached)`,
+        };
+      }
     }
-    return { kind: "error", message: `Did not find any relation named "${name}".` };
+    return { kind: "error", message: `Did not find any relation named "${arg}".` };
   }
   if (/^\\timing$/.test(trimmed)) return { kind: "notice", message: "Timing is on." };
   if (/^\\x$/.test(trimmed))      return { kind: "notice", message: "Expanded display is on." };
@@ -618,16 +634,32 @@ function Session({ tab, onUpdateTab }) {
     }
   };
 
-  // Focus textarea when clicking inside the log area (real psql-y feel)
+  // Focus textarea on a *click* in the log area (real psql-y feel) while
+  // still letting the user drag-select log content for copy. Old version
+  // focused on mousedown, which interrupted selection before it could
+  // begin. Now we track the mousedown point and only steal focus on mouseup
+  // when the pointer didn't move (a click, not a drag) and nothing got
+  // selected.
+  const dragRef = sUseRef(null);
   const onSessionMouseDown = (e) => {
-    // Don't steal focus if user is selecting text
-    const sel = window.getSelection();
-    if (sel && sel.toString()) return;
-    setTimeout(() => taRef.current?.focus(), 0);
+    dragRef.current = { x: e.clientX, y: e.clientY };
+  };
+  const onSessionMouseUp = (e) => {
+    const start = dragRef.current;
+    dragRef.current = null;
+    if (!start) return;
+    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+    if (moved > 3) return;  // drag → user is selecting; leave selection alone
+    // Defer one tick so double-click word selection has time to register.
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (sel && sel.toString().length > 0) return;
+      taRef.current?.focus();
+    }, 0);
   };
 
   return (
-    <div className="repl" ref={wrapRef} onMouseDown={onSessionMouseDown}>
+    <div className="repl" ref={wrapRef} onMouseDown={onSessionMouseDown} onMouseUp={onSessionMouseUp}>
       <div className="repl-log" ref={logRef}>
         {(tab.log || []).map((e, i) => {
           if (e.kind === "welcome") return <div key={i} className="psql-line dim">{e.text}</div>;
