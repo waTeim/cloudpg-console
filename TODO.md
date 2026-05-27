@@ -128,6 +128,15 @@ to showing under every user.
 - **Code-signing.** `electron-builder` reads signing creds from env
   (`CSC_LINK`, `CSC_KEY_PASSWORD` on mac/win); see their docs. No
   signing config currently lives in `package.json`.
+- **Titlebar min/max/close buttons (Linux/Windows).** The three
+  `.os-provided` buttons in `<Titlebar>` (`src/app.jsx`) render but have
+  no `onClick`. They're hidden on macOS (`[data-platform="darwin"]`
+  rule in `styles.css`) since the traffic lights cover the same
+  functionality, but on Linux/Windows they need to be wired through
+  Electron. Plan: add `win:minimize` / `win:maximize` (toggle
+  `isMaximized() ? unmaximize() : maximize()`) / `win:close` IPC
+  handlers in `electron/main.js`, expose them on `window.cloudpg.win.*`
+  via `electron/preload.js`, and hook the buttons' `onClick`.
 
 ---
 

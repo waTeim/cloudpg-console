@@ -94,9 +94,9 @@ function Titlebar() {
         >
           <Icon name="settings" size={13} />
         </button>
-        <button title="Minimize"><Icon name="min" size={13} /></button>
-        <button title="Maximize"><Icon name="max" size={11} /></button>
-        <button className="close" title="Close"><Icon name="x" size={13} /></button>
+        <button className="os-provided" title="Minimize"><Icon name="min" size={13} /></button>
+        <button className="os-provided" title="Maximize"><Icon name="max" size={11} /></button>
+        <button className="os-provided close" title="Close"><Icon name="x" size={13} /></button>
       </div>
     </div>
   );

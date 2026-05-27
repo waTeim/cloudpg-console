@@ -198,6 +198,9 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 }
 .win-controls button:hover { background: var(--bg-hover); color: var(--fg); }
 .win-controls button.close:hover { background: var(--err); color: white; }
+/* macOS already paints min/max/close in the traffic-light area — hide our
+   redundant copies so only the Settings gear remains in .win-controls. */
+[data-platform="darwin"] .win-controls .os-provided { display: none; }
 
 /* ---------- App body ---------- */
 .app-body {
