@@ -558,12 +558,17 @@ function Session({ tab, onUpdateTab }) {
     }
     // Enter to submit (Shift+Enter = newline; meta-command starting with \ submits immediately)
     if (e.key === "Enter" && !e.shiftKey) {
-      // Allow incomplete statements to continue on newline naturally
       if (isCompleteStatement(buffer)) {
         e.preventDefault();
         run(buffer);
+      } else if (buffer.trim() === "") {
+        // Degenerate "hit Enter on an empty prompt" — psql echoes the
+        // prompt to the scrollback and reprints a fresh one below, instead
+        // of just growing the textarea with an orphaned blank line.
+        e.preventDefault();
+        onUpdateTab({ log: [...(tab.log || []), { kind: "prompt", db: tab.db, text: "" }] });
       }
-      // else: let Enter insert a newline (textarea default)
+      // else: incomplete multi-line statement — let Enter insert a newline
       return;
     }
     // History navigation only when caret is at the very start (Up) or end (Down)
