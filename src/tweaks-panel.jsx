@@ -220,6 +220,7 @@ function TweaksPanel({ title = 'Tweaks', children }) {
       const t = e?.data?.type;
       if (t === '__activate_edit_mode') setOpen(true);
       else if (t === '__deactivate_edit_mode') setOpen(false);
+      else if (t === '__toggle_edit_mode') setOpen(o => !o);
     };
     window.addEventListener('message', onMsg);
     window.parent.postMessage({ type: '__edit_mode_available' }, '*');

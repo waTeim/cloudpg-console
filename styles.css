@@ -1522,3 +1522,69 @@ table.results-table {
   margin-left: auto;
 }
 .connect-pop .row.is-super .role { color: var(--accent); }
+
+/* =========================================================================
+   TweaksPanel theme overrides.
+
+   tweaks-panel.jsx injects its own <style> at render time with hardcoded
+   colors for a paper-cream look. The injected style cascades after this
+   file (it loads at component mount), so we bump specificity with `html`
+   to win on the cascade with equal specificity rules.
+   ========================================================================= */
+html .twk-panel {
+  background: color-mix(in oklab, var(--bg-elevated) 88%, transparent);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+}
+html .twk-x { color: var(--fg-mute); }
+html .twk-x:hover { background: var(--bg-hover); color: var(--fg); }
+html .twk-body { scrollbar-color: var(--line-strong) transparent; }
+html .twk-body::-webkit-scrollbar-thumb { background: var(--line-strong); }
+html .twk-body::-webkit-scrollbar-thumb:hover { background: var(--fg-mute); }
+html .twk-lbl { color: var(--fg-dim); }
+html .twk-val { color: var(--fg-mute); }
+html .twk-sect { color: var(--fg-mute); }
+html .twk-field {
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+html .twk-field:focus {
+  background: var(--bg-input);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+html .twk-slider { background: var(--bg-active); }
+html .twk-slider::-webkit-slider-thumb {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+html .twk-slider::-moz-range-thumb {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+html .twk-seg { background: var(--bg-input); }
+html .twk-seg-thumb { background: var(--bg-elevated); box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+html .twk-toggle { background: var(--bg-active); }
+html .twk-toggle[data-on="1"] { background: var(--accent); }
+html .twk-toggle i { background: var(--fg); }
+html .twk-toggle[data-on="1"] i { background: var(--bg-elevated); }
+html .twk-num {
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+}
+html .twk-num-lbl { color: var(--fg-dim); }
+html .twk-num-unit { color: var(--fg-mute); }
+html .twk-btn {
+  background: var(--accent);
+  color: var(--bg);
+}
+html .twk-btn:hover { filter: brightness(1.08); }
+html .twk-btn.secondary {
+  background: var(--bg-input);
+  color: var(--fg);
+}
+html .twk-btn.secondary:hover { background: var(--bg-hover); }

@@ -88,7 +88,12 @@ function Titlebar() {
       <div className="center" />
 
       <div className="win-controls">
-        <button title="Settings"><Icon name="settings" size={13} /></button>
+        <button
+          title="Settings"
+          onClick={() => window.postMessage({ type: "__toggle_edit_mode" }, "*")}
+        >
+          <Icon name="settings" size={13} />
+        </button>
         <button title="Minimize"><Icon name="min" size={13} /></button>
         <button title="Maximize"><Icon name="max" size={11} /></button>
         <button className="close" title="Close"><Icon name="x" size={13} /></button>
