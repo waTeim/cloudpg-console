@@ -650,8 +650,8 @@ function Session({ tab, onUpdateTab }) {
       if (e.key === "ArrowDown") { e.preventDefault(); kbdNavRef.current = true; setAcState(s => ({ ...s, idx: Math.min(s.items.length - 1, s.idx + 1) })); return; }
       if (e.key === "ArrowUp")   { e.preventDefault(); kbdNavRef.current = true; setAcState(s => ({ ...s, idx: Math.max(0, s.idx - 1) })); return; }
       if (e.key === "Tab")       { e.preventDefault(); accept(acState.items[acState.idx]); return; }
+      if (e.key === "Enter")     { e.preventDefault(); accept(acState.items[acState.idx]); return; }
       if (e.key === "Escape")    { e.preventDefault(); setAcState(s => ({ ...s, open: false })); return; }
-      if (e.key === "Enter")     { setAcState(s => ({ ...s, open: false })); /* fall through to Enter handler */ }
     }
 
     // Tab (popup closed): bash-style completion.
