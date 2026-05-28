@@ -74,6 +74,10 @@ Output of `make package` lands in `./dist`.
 └────────────────────────────────────────────────────────────┼──────┘
                                                              │ IPC
 ┌─ main (electron/main.js) ──────────────────────────────────┼──────┐
+│  startup:                                                  │      │
+│   augmentPathForGuiLaunch()  add /opt/homebrew/bin etc.    │      │
+│   probeKubeconfigFromShell() narrow $KUBECONFIG probe      │      │
+│                                                            │      │
 │  envelope(fn)         catches & normalizes errors          │      │
 │  loadKubeconfigSafe() merges multi-file kubeconfigs        │      │
 │                                                            │      │
@@ -83,6 +87,7 @@ Output of `make package` lands in `./dist`.
 │  k8s:listCNPGDatabases ── CustomObjectsApi (databases)     ◄──────┤
 │  k8s:listCNPGUsers    ─── filter secrets cnpg-<cluster>-*  ◄──────┤
 │  k8s:readUserSecret   ─── base64-decode username/password  ◄──────┤
+│  k8s:diagnose         ─── kubeconfig probe & file snapshot ◄──────┤
 │  pg:connect           ─┬─ SSAR pre-flight (portforward?)   ◄──────┤
 │                        ├─ PortForward → primary pod        │      │
 │                        └─ new pg.Client                    │      │
@@ -115,6 +120,42 @@ the user whose name matches `spec.owner`. Databases with no `owner` (or
 clusters with no Database CR — only a bootstrap initdb seed) fall back
 to showing under every user.
 
+### GUI launch environment
+
+macOS/Linux GUI launches (Finder double-click, dock, AppImage) start
+with a minimal env: `$PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, and
+shell-set variables like `$KUBECONFIG` aren't inherited. Two narrow
+fixups at startup, in `electron/main.js`:
+
+- `augmentPathForGuiLaunch()` prepends standard package-manager dirs to
+  `$PATH` (`/opt/homebrew/{bin,sbin}`, `/usr/local/{bin,sbin}`,
+  `~/.local/bin`) — deterministic, no probing. Lets exec-auth providers
+  (`aws`, `gcloud`, `kubectl-oidc_login`) be found.
+- `probeKubeconfigFromShell()` narrowly extracts **only** `$KUBECONFIG`
+  from the user's interactive+login shell when our env doesn't already
+  have it. Finds the actual login shell via `dscl . -read /Users/$USER
+  UserShell` (macOS) or `getent passwd $USER` (Linux), then falls back
+  to `$SHELL`, `/bin/bash`, `/bin/zsh`, `/bin/sh`. Stops at the first
+  candidate whose `-ilc 'printf …$KUBECONFIG'` returns a non-empty
+  value. We deliberately don't inherit anything else from the shell —
+  the broad "shell-env app" pattern was rejected, with `$KUBECONFIG`
+  carved out as the one variable that has no in-app alternative.
+
+### Diagnostics surface
+
+`k8s:diagnose` returns a snapshot of the kubeconfig discovery state:
+`$KUBECONFIG` value, default path, per-file existence/readability/size,
+context count, kube load error, and the full `kubeconfigProbe` state
+(per-shell attempts with stdout/stderr/value/error/ms). The renderer's
+`EmptyState` calls it **only** when bootstrap has actually failed —
+`bootstrapState === 'error'` or `'loaded' && ctxCount === 0`. During
+normal loading, the spinner copy is shown alone. Once bootstrap
+succeeds with contexts, the diag panel never appears.
+
+Set `CLOUDPG_DEBUG=1` (e.g. `launchctl setenv CLOUDPG_DEBUG 1` on
+macOS) and packaged builds auto-open DevTools — useful when
+stdout/stderr go nowhere visible.
+
 ---
 
 ## Notes / gotchas
@@ -127,16 +168,16 @@ to showing under every user.
   throws on collisions; `loadKubeconfigSafe()` in `main.js` falls back
   to per-file load with name-deduplication (first wins).
 - **Code-signing & notarization (macOS).** Scaffolding is in place but
-  inactive. When you're ready:
+  inactive. When you're ready, the steps are documented inline in
+  `electron-builder.yml` under the `mac:` block — short version:
   1. Get a Developer ID Application cert from Apple, export as `.p12`,
      `export CSC_LINK=/path/to/cert.p12 CSC_KEY_PASSWORD='...'`.
   2. Generate an app-specific password for your Apple ID at
      <https://appleid.apple.com>, then `export APPLE_ID='you@…'
      APPLE_APP_SPECIFIC_PASSWORD='xxxx-xxxx-xxxx-xxxx'
      APPLE_TEAM_ID='XXXXXXXXXX'`.
-  3. In `package.json`, drop the `//` prefix from the four `mac.//…`
-     keys (`hardenedRuntime`, `entitlements`, `entitlementsInherit`,
-     `notarize`).
+  3. In `electron-builder.yml`, uncomment the four `# hardenedRuntime`,
+     `# entitlements`, `# entitlementsInherit`, `# notarize` lines.
   4. `make package-mac` will now sign and notarize.
 
   The entitlements file is already at `build/entitlements.mac.plist`
@@ -193,7 +234,10 @@ to showing under every user.
 │   └── entitlements.mac.plist signing/notarization (currently inactive)
 ├── out/                       generated, gitignored — compiled renderer JS
 ├── vendor/                    generated, gitignored — React UMD bundles
-├── package.json
+├── package.json               npm scripts + deps
+├── electron-builder.yml       packaging config (separate so YAML # comments work)
 ├── Makefile
+├── README.md                  github-facing description + quickstart
+├── CLAUDE.md                  guidance for Claude Code sessions
 └── TODO.md                    you are here
 ```

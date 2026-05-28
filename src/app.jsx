@@ -216,9 +216,31 @@ function Statusbar({ tab, tabs }) {
   );
 }
 
-function EmptyState({ onOpenPalette, onPick, recents, contexts }) {
+function EmptyState({ onOpenPalette, onPick, recents, contexts, bootstrapState, bootstrapError }) {
   const ctxCount  = Object.keys(contexts || {}).length;
   const allTargets = aUseMemo(() => window.flattenTargets(contexts), [contexts]);
+  const [diag, setDiag] = aUseState(null);
+
+  // Only fetch + show diagnostics when bootstrap has actually FAILED:
+  // it errored out, or it completed loading but found zero contexts.
+  // While still loading, the spinner copy is enough — popping the diag
+  // panel during a normal-but-slow init is just noise.
+  const showDiag = bootstrapState === 'error'
+    || (bootstrapState === 'loaded' && ctxCount === 0);
+
+  aUseEffect(() => {
+    if (!showDiag) { setDiag(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await window.cloudpg.k8s.diagnose();
+        if (!cancelled) setDiag(r?.ok ? r.data : { loadError: r?.error || 'diagnose failed' });
+      } catch (e) {
+        if (!cancelled) setDiag({ loadError: String(e?.message || e) });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showDiag]);
 
   const samples = aUseMemo(() => {
     return [...recents.slice(0, 2),
@@ -232,13 +254,112 @@ function EmptyState({ onOpenPalette, onPick, recents, contexts }) {
         <div className="glyph"><Icon name="logo" size={28} /></div>
         <h1>Open a Postgres cluster</h1>
         <p>
-          {ctxCount > 0
-            ? <>Detected <b style={{color:"var(--fg)"}}>{ctxCount}</b> kubernetes contexts, <b style={{color:"var(--fg)"}}>{allTargets.length}</b> reachable (user, database) pairs.</>
-            : <>Loading kubernetes contexts…</>
-          }
+          {ctxCount > 0 ? (
+            <>Detected <b style={{color:"var(--fg)"}}>{ctxCount}</b> kubernetes contexts, <b style={{color:"var(--fg)"}}>{allTargets.length}</b> reachable (user, database) pairs.</>
+          ) : bootstrapState === 'loading' ? (
+            <>Loading kubernetes contexts…</>
+          ) : bootstrapState === 'error' ? (
+            <>Failed to load kubernetes contexts.</>
+          ) : (
+            <>No kubernetes contexts found.</>
+          )}
           <br />
-          Pick a target from the sidebar, or jump straight in with the switcher.
+          {ctxCount > 0
+            ? <>Pick a target from the sidebar, or jump straight in with the switcher.</>
+            : showDiag
+              ? <>See diagnostics below.</>
+              : <>This usually takes a moment.</>}
         </p>
+
+        {diag && showDiag && (
+          <div className="empty-diag">
+            <div className="empty-diag-title">
+              Diagnostics
+              {bootstrapState === 'error' && bootstrapError && (
+                <span style={{ marginLeft: 8, color: "var(--err)", fontWeight: 400 }}>
+                  · {bootstrapError}
+                </span>
+              )}
+            </div>
+            <div className="empty-diag-row">
+              <span>$KUBECONFIG</span>
+              <code>{diag.kubeconfigEnv || <em>not set</em>}</code>
+            </div>
+            {diag.kubeconfigProbe && (
+              <>
+                <div className="empty-diag-row">
+                  <span>Probe source</span>
+                  <code>
+                    {diag.kubeconfigProbe.source || "?"}
+                    {diag.kubeconfigProbe.shell && (
+                      <em style={{ marginLeft: 6, color: "var(--fg-mute)" }}>
+                        via {diag.kubeconfigProbe.shell}
+                      </em>
+                    )}
+                    {diag.kubeconfigProbe.durationMs != null && (
+                      <em style={{ marginLeft: 6, color: "var(--fg-mute)" }}>
+                        ({diag.kubeconfigProbe.durationMs}ms)
+                      </em>
+                    )}
+                  </code>
+                </div>
+                {diag.kubeconfigProbe.loginShell && (
+                  <div className="empty-diag-row">
+                    <span>Login shell</span>
+                    <code>{diag.kubeconfigProbe.loginShell} <em style={{color:"var(--fg-mute)"}}>(from dscl/getent)</em></code>
+                  </div>
+                )}
+                {diag.kubeconfigProbe.reason && (
+                  <div className="empty-diag-row">
+                    <span>Probe reason</span>
+                    <code>{diag.kubeconfigProbe.reason}</code>
+                  </div>
+                )}
+                {(diag.kubeconfigProbe.attempts || []).map((a, i) => (
+                  <div className="empty-diag-row" key={i}>
+                    <span>Probe #{i + 1}</span>
+                    <code style={{ whiteSpace: "pre-wrap" }}>
+                      {a.shell} ({a.ms}ms){a.value ? ` → ${a.value}` : " → empty"}
+                      {a.error   && `\n  error: ${a.error}`}
+                      {a.stderr  && `\n  stderr: ${a.stderr.trim()}`}
+                    </code>
+                  </div>
+                ))}
+              </>
+            )}
+            <div className="empty-diag-row">
+              <span>Default path</span>
+              <code>{diag.defaultPath}</code>
+            </div>
+            {(diag.files || []).map(f => (
+              <div className="empty-diag-row" key={f.path}>
+                <span>{f.path.split('/').slice(-2).join('/')}</span>
+                <code>
+                  {f.exists ? `${f.sizeBytes} bytes` : "missing"}
+                  {f.exists && !f.readable && " (unreadable)"}
+                </code>
+              </div>
+            ))}
+            <div className="empty-diag-row">
+              <span>Contexts found</span>
+              <code>{diag.contextCount ?? 0}</code>
+            </div>
+            {diag.loadError && (
+              <div className="empty-diag-row err">
+                <span>Load error</span>
+                <code>{diag.loadError}</code>
+              </div>
+            )}
+            {(!diag.kubeconfigEnv && (diag.contextCount === 0 || (diag.files || []).every(f => !f.exists))) && (
+              <div className="empty-diag-hint">
+                Tip: if you set <code>$KUBECONFIG</code> in your shell rc files, macOS Finder/dock launches
+                don't see it. Either run <code>launchctl setenv KUBECONFIG "$KUBECONFIG"</code> in a
+                terminal once, or symlink your config to <code>~/.kube/config</code>.
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="kbd-row">
           <button className="cmdk-btn" style={{ minWidth: 320 }} onClick={onOpenPalette}>
             <Icon name="search" size={12} />
@@ -302,15 +423,24 @@ function App() {
   const [sidebarHidden, setSidebarHidden] = aUseState(false);
   aUseEffect(() => { setSidebarWidth(t.sidebarWidth ?? 280); }, [t.sidebarWidth]);
 
-  // k8s contexts, loaded async on startup
+  // k8s contexts, loaded async on startup. bootstrapState distinguishes
+  // "still loading" (don't pop diagnostics) from "loaded but empty" /
+  // "errored" (do show diagnostics — the user needs to see why).
   const [contexts, setContexts] = aUseState({});
+  const [bootstrapState, setBootstrapState] = aUseState('loading');  // loading | loaded | error
+  const [bootstrapError, setBootstrapError] = aUseState(null);
 
   const loadContexts = aUseCallback(async () => {
+    setBootstrapState('loading');
+    setBootstrapError(null);
     try {
       const ctxData = await window.backend.bootstrap();
       setContexts(ctxData);
+      setBootstrapState('loaded');
     } catch (err) {
       console.error('Failed to load contexts:', err);
+      setBootstrapError(String(err?.message || err));
+      setBootstrapState('error');
     }
   }, []);
 
@@ -468,6 +598,8 @@ function App() {
               onPick={openSession}
               recents={recents}
               contexts={contexts}
+              bootstrapState={bootstrapState}
+              bootstrapError={bootstrapError}
             />
           )}
         </div>

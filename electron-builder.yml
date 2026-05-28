@@ -1,0 +1,52 @@
+# electron-builder configuration.
+#
+# Lives alongside package.json so we can keep YAML's "#" comments —
+# package.json (JSON) doesn't allow that, and electron-builder 25
+# rejects "//key" pseudo-comments as unknown properties.
+
+appId: io.cloudpg.console
+productName: CloudPG Console
+
+files:
+  - CloudPG Console.html
+  - styles.css
+  - out/**/*
+  - vendor/**/*
+  - electron/**/*
+
+directories:
+  output: dist
+  buildResources: build
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  # ── Signing & notarization (currently disabled) ────────────────────────────
+  # When you're ready to ship signed/notarized macOS builds:
+  #   1.  Get a Developer ID Application cert from Apple, export as .p12.
+  #       export CSC_LINK=/abs/path/to/cert.p12
+  #       export CSC_KEY_PASSWORD='cert-password'
+  #   2.  Create an app-specific password at appleid.apple.com.
+  #       export APPLE_ID='you@example.com'
+  #       export APPLE_APP_SPECIFIC_PASSWORD='xxxx-xxxx-xxxx-xxxx'
+  #       export APPLE_TEAM_ID='XXXXXXXXXX'
+  #   3.  Uncomment the four keys below.
+  #   4.  `make package-mac`
+  #
+  # hardenedRuntime: true
+  # entitlements: build/entitlements.mac.plist
+  # entitlementsInherit: build/entitlements.mac.plist
+  # notarize: true
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+
+win:
+  target:
+    - nsis
+    - portable

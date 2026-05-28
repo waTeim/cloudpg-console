@@ -1,6 +1,7 @@
 // CloudPG Console — Electron main process
 
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { execSync } = require('child_process');
 const path = require('path');
 const os   = require('os');
 const net  = require('net');
@@ -9,6 +10,163 @@ const k8s = require('@kubernetes/client-node');
 const { Client } = require('pg');
 
 let win;
+
+// macOS/Linux GUI launch (double-click .app, dock click, AppImage) starts
+// the process with a minimal $PATH:
+//   /usr/bin:/bin:/usr/sbin:/sbin
+// — none of /usr/local/bin, /opt/homebrew/bin, or ~/.local/bin. That
+// breaks kubeconfig exec-auth providers (aws, gcloud, kubectl-oidc_login)
+// the kubernetes client spawns to refresh credentials. Symptom: sidebar
+// stuck at "Loading contexts…" because every probe errors out.
+//
+// We deliberately do NOT probe the user's shell or inherit shell env —
+// the app should be self-contained. We just prepend the standard system
+// tool locations to $PATH so binaries that exist at conventional
+// package-manager paths can be found.
+//
+// Kubeconfig discovery itself needs no help: @kubernetes/client-node's
+// loadFromDefault() honors $KUBECONFIG if set in our environment, else
+// falls back to ~/.kube/config. We do not attempt to read a $KUBECONFIG
+// the user only set in their shell rc files — that would require shell
+// probing. Users with non-standard kubeconfig paths should either point
+// $KUBECONFIG via `launchctl setenv KUBECONFIG ...` (macOS) or symlink
+// ~/.kube/config to their preferred file.
+function augmentPathForGuiLaunch() {
+  if (process.platform === 'win32') return;  // Win32 inherits the user's env
+  if (!app.isPackaged) return;                // dev launches inherit the shell's
+  const extras = [
+    '/opt/homebrew/bin',  // macOS Homebrew (arm64)
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',     // macOS Homebrew (x64), common /usr/local installs
+    '/usr/local/sbin',
+    `${process.env.HOME || ''}/.local/bin`,  // pipx, cargo, asdf shims
+  ].filter(Boolean);
+  process.env.PATH = `${extras.join(':')}:${process.env.PATH || ''}`;
+}
+augmentPathForGuiLaunch();
+
+// $KUBECONFIG is the one piece of shell-set state the app legitimately
+// needs and has no in-app alternative for — many users colon-join
+// multiple files via $KUBECONFIG in their shell rc and that's their
+// source of truth for which clusters exist. GUI launches on macOS/Linux
+// don't inherit shell env, so we'd otherwise see only ~/.kube/config
+// (often an empty stub) and report "0 contexts".
+//
+// Narrow probe: fork the user's shell ONCE, echo only $KUBECONFIG, copy
+// it into process.env. We deliberately don't inherit PATH/HOME/AWS/etc.
+// from the shell — those are the broad "shell-env app" trap.
+//
+// Skips when KUBECONFIG is already in our env (terminal launch,
+// `launchctl setenv`, Info.plist LSEnvironment, etc.), on Windows
+// (Win32 GUI launches inherit the user env), and in dev (`npm run dev`
+// already has the shell's env).
+// Probe state, exposed in the k8s:diagnose IPC so the user can see
+// whether we tried, which shell we used, what came back, and why.
+const kubeconfigProbe = {
+  source:     null,   // 'env' | 'shell' | 'default' | 'error' | 'skipped'
+  reason:     '',     // human-readable explanation
+  shell:      null,   // shell that yielded the value (if any)
+  attempts:   [],     // per-shell { shell, stdout, stderr, value, error, ms }
+  durationMs: null,
+};
+
+// Look up the user's configured login shell from the OS identity store
+// (macOS dscl, Linux nss/getent). More authoritative than $SHELL because
+// it doesn't depend on what env launchd or a terminal happened to set.
+// Returns null on lookup failure — caller falls back to $SHELL.
+function findLoginShell() {
+  const { spawnSync } = require('child_process');
+  const user = process.env.USER || os.userInfo().username;
+  if (!user) return null;
+  try {
+    if (process.platform === 'darwin') {
+      const r = spawnSync('dscl', ['.', '-read', `/Users/${user}`, 'UserShell'],
+        { encoding: 'utf8', timeout: 1000 });
+      const m = (r.stdout || '').match(/UserShell:\s*(\S+)/);
+      return m ? m[1].trim() : null;
+    }
+    if (process.platform === 'linux') {
+      const r = spawnSync('getent', ['passwd', user],
+        { encoding: 'utf8', timeout: 1000 });
+      const parts = (r.stdout || '').trim().split(':');
+      // /etc/passwd line: name:passwd:uid:gid:gecos:home:shell
+      return parts.length >= 7 ? parts[6].trim() : null;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function probeOneShell(shellPath, mark) {
+  const { spawnSync } = require('child_process');
+  const t0 = Date.now();
+  // -i sources interactive rc (~/.bashrc, ~/.zshrc), -l sources login
+  // rc (~/.bash_profile, ~/.zprofile) — covers both styles.
+  const r = spawnSync(
+    shellPath,
+    ['-ilc', `printf '%s:%s\\n' '${mark}' "$KUBECONFIG"`],
+    { encoding: 'utf8', timeout: 2500 }
+  );
+  const out = { shell: shellPath, ms: Date.now() - t0, stdout: (r.stdout || '').slice(0, 400), stderr: (r.stderr || '').slice(0, 400), value: '', error: null };
+  if (r.error) { out.error = String(r.error.message || r.error); return out; }
+  const m = (r.stdout || '').match(new RegExp(`^${mark}:(.*)$`, 'm'));
+  if (m) out.value = m[1];
+  return out;
+}
+
+function probeKubeconfigFromShell() {
+  if (process.env.KUBECONFIG) {
+    kubeconfigProbe.source = 'env';
+    kubeconfigProbe.reason = '$KUBECONFIG already set in process env (terminal launch, launchctl setenv, or Info.plist LSEnvironment)';
+    return;
+  }
+  if (process.platform === 'win32') {
+    kubeconfigProbe.source = 'skipped';
+    kubeconfigProbe.reason = 'win32 GUI launches inherit user env natively; no probe needed';
+    return;
+  }
+  if (!app.isPackaged) {
+    kubeconfigProbe.source = 'skipped';
+    kubeconfigProbe.reason = 'dev launch already inherits shell env';
+    return;
+  }
+
+  // Find the user's *configured* login shell from the system identity
+  // store — more authoritative than $SHELL, which can be stale or
+  // overridden. Tried first; $SHELL and the static fallback list catch
+  // edge cases where the configured login shell isn't the one sourcing
+  // the user's KUBECONFIG rc.
+  const loginShell = findLoginShell();
+  kubeconfigProbe.loginShell = loginShell;
+  const fs = require('fs');
+  const seen = new Set();
+  const candidates = [];
+  for (const s of [loginShell, process.env.SHELL, '/bin/bash', '/bin/zsh', '/bin/sh']) {
+    if (!s || seen.has(s) || !fs.existsSync(s)) continue;
+    seen.add(s);
+    candidates.push(s);
+  }
+
+  const MARK = '__CLOUDPG_KCFG__';
+  const t0 = Date.now();
+  for (const sh of candidates) {
+    const r = probeOneShell(sh, MARK);
+    kubeconfigProbe.attempts.push(r);
+    if (r.value) {
+      process.env.KUBECONFIG = r.value;
+      kubeconfigProbe.shell = sh;
+      kubeconfigProbe.source = 'shell';
+      kubeconfigProbe.reason = `read from ${sh} interactive-login env`;
+      kubeconfigProbe.durationMs = Date.now() - t0;
+      return;
+    }
+  }
+  kubeconfigProbe.durationMs = Date.now() - t0;
+  kubeconfigProbe.source = candidates.length === 0 ? 'error' : 'default';
+  kubeconfigProbe.reason = candidates.length === 0
+    ? 'no shell available to probe'
+    : `tried ${candidates.length} shell(s); $KUBECONFIG was empty or missing in each (see attempts below)`;
+}
+probeKubeconfigFromShell();
 
 function createWindow() {
   win = new BrowserWindow({
@@ -29,6 +187,13 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // Opt-in debug for packaged GUI launches where stdout/stderr go nowhere
+  // the user can see. Set with `launchctl setenv CLOUDPG_DEBUG 1` on
+  // macOS to make it persist across Finder launches.
+  if (process.env.CLOUDPG_DEBUG) {
+    win.webContents.on('did-finish-load', () => win.webContents.openDevTools({ mode: 'right' }));
+  }
 }
 
 app.whenReady().then(() => {
@@ -126,6 +291,51 @@ ipcMain.handle('k8s:listContexts', envelope(async () => {
     user:      c.user,
     namespace: c.namespace || 'default',
   }));
+}));
+
+// Inspect the environment we'd use to load kubeconfigs, plus what we
+// found when we tried. Used by the EmptyState when no contexts come
+// back, so the user can see *why* (file missing, $KUBECONFIG not set in
+// GUI launch env, parse error, zero contexts in the file, etc.) instead
+// of staring at a permanent "Loading…" spinner.
+ipcMain.handle('k8s:diagnose', envelope(async () => {
+  const fs = require('fs');
+  const kubeconfigEnv = process.env.KUBECONFIG || null;
+  const defaultPath   = path.join(os.homedir(), '.kube', 'config');
+  const sources       = kubeconfigEnv ? kubeconfigEnv.split(path.delimiter) : [defaultPath];
+
+  const files = sources.map(p => {
+    const exists = fs.existsSync(p);
+    let readable = false, sizeBytes = 0;
+    if (exists) {
+      try { fs.accessSync(p, fs.constants.R_OK); readable = true; } catch (_) {}
+      try { sizeBytes = fs.statSync(p).size; } catch (_) {}
+    }
+    return { path: p, exists, readable, sizeBytes };
+  });
+
+  let contextCount = 0;
+  let loadError    = null;
+  try {
+    const kc = loadKubeconfigSafe();
+    contextCount = kc.getContexts().length;
+  } catch (e) {
+    loadError = friendlyErr(e);
+  }
+
+  return {
+    platform:           process.platform,
+    arch:               process.arch,
+    home:               process.env.HOME || os.homedir(),
+    isPackaged:         app.isPackaged,
+    kubeconfigEnv,            // value of $KUBECONFIG seen by this process
+    kubeconfigProbe:    { ...kubeconfigProbe },  // full probe state for UI
+    defaultPath,              // where we'd look if $KUBECONFIG is unset
+    files,                    // per-file existence/readability/size
+    contextCount,             // contexts the kube client saw
+    loadError,                // friendly error from loading, if any
+    pathEnv:            process.env.PATH || '',
+  };
 }));
 
 ipcMain.handle('k8s:listNamespaces', envelope(async (_evt, contextName) => {

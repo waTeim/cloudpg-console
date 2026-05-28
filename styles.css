@@ -1233,6 +1233,51 @@ table.results-table {
 }
 .empty .recents .row:last-child { border-bottom: 0; }
 .empty .recents .row:hover { background: var(--bg-hover); }
+
+.empty-diag {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  text-align: left;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  max-width: 520px;
+}
+.empty-diag-title {
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.empty-diag-row {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 3px 0;
+  color: var(--fg-dim);
+}
+.empty-diag-row > span { flex: none; width: 130px; color: var(--fg-mute); }
+.empty-diag-row > code { flex: 1; color: var(--fg); word-break: break-all; }
+.empty-diag-row.err > code { color: var(--err); }
+.empty-diag-hint {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.empty-diag-hint code {
+  background: var(--bg-input);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--accent);
+}
 .empty .recents .path { color: var(--fg); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .empty .recents .path .sep { color: var(--fg-faint); padding: 0 4px; }
 .empty .recents .path .ctx { color: var(--accent); }

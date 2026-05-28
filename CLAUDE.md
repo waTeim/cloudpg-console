@@ -10,22 +10,35 @@ Electron desktop app that gives you a psql-style REPL against CloudNativePG (`po
 
 ```sh
 make install      # npm install
-make dev          # electron . --enable-logging
-make start        # electron .
-make package      # electron-builder for current platform
+make build        # esbuild src/*.jsx → out/*.js, vendor React → vendor/
+make dev          # build, then electron . --enable-logging
+make start        # build, then electron .
+make package      # build, then electron-builder for current platform
 make package-mac  # also: -linux, -win
-make clean        # rm -rf dist
+make clean        # rm -rf dist out vendor
 make distclean    # also wipes node_modules
 ```
 
 **Node 20 LTS is required.** Node 24+ breaks `extract-zip` in Electron's post-install, leaving you with no binary in `node_modules/electron/dist`. Use `nvm install 20 && nvm use 20`. No test runner is configured.
 
-There's no bundler: the renderer loads React + Babel from `unpkg.com` and Babel compiles `.jsx` in the browser. To syntax-check JSX outside the app:
+### Build pipeline
+
+`scripts/build.js` is an esbuild driver, ~30 lines. For each `src/*.jsx` it runs the classic JSX transform (`React.createElement` / `React.Fragment` — keeps the existing "React is a global" convention), minifies, drops inline sourcemaps, writes to `out/*.js`. Copies `src/backend.js` through unchanged. Copies `node_modules/react{,-dom}/umd/*.production.min.js` into `vendor/`. Runs in ~10ms.
+
+`CloudPG Console.html` references `vendor/react*.js` and `out/*.js` directly — no Babel, no unpkg, no network on launch. Load order matters because each script publishes to `window.*` and later files depend on earlier ones (`backend → tweaks → icons → sidebar → session → palette → app`).
+
+`out/` and `vendor/` are gitignored. `make clean` removes them. Editing a `.jsx` requires `make build` again — no watch mode currently (tracked in `TODO.md`).
+
+To syntax-check JSX outside the pipeline:
 
 ```sh
 npm i --no-save @babel/core @babel/preset-react
 node -e "require('@babel/core').transformSync(require('fs').readFileSync('src/session.jsx','utf8'), { presets: ['@babel/preset-react'] })"
 ```
+
+### Packaging
+
+electron-builder config lives in **`electron-builder.yml`** (separate from `package.json` so YAML `#` comments survive — electron-builder 25 rejects unknown keys, so the JSON `"//"` pseudo-comment trick doesn't work). The `mac:` block has signing scaffolding commented out with inline instructions for when an Apple Developer account is available. `build/entitlements.mac.plist` is already in place.
 
 ## Architecture
 
@@ -42,6 +55,23 @@ This has a non-obvious consequence: a top-level `function foo() {}` in any `.jsx
 - Files publish their exports by assigning to `window.*` at the bottom (`window.Session = Session`, `window.flattenTargets = flattenTargets`, etc.).
 - **Never do** `window.foo = (x) => foo(x)` — the arrow body references `window.foo` (which is now the arrow itself) and infinite-recurses. Use direct assignment `window.foo = foo`.
 - `window.SCHEMAS`, `window.PHASE_VARIANT`, `window.SQL_KEYWORDS`, `window.SQL_FUNCTIONS`, `window.PSQL_META` live in `src/backend.js` and are read across files.
+
+### GUI launch environment handling
+
+macOS/Linux Finder/dock launches start the process with a minimal env — `$PATH` is `/usr/bin:/bin:/usr/sbin:/sbin` and shell-set vars like `$KUBECONFIG` are *not* inherited. The app would otherwise stare at "Loading contexts…" forever because exec-auth providers (`aws`, `gcloud`, `kubectl-oidc_login`) and the user's actual kubeconfig list are invisible. `electron/main.js` does two narrow, deterministic things at startup:
+
+- **`augmentPathForGuiLaunch()`** — prepends standard package-manager dirs to `$PATH` (`/opt/homebrew/{bin,sbin}`, `/usr/local/{bin,sbin}`, `~/.local/bin`). No probing, no shell exec. Runs only when `app.isPackaged && process.platform !== 'win32'`.
+- **`probeKubeconfigFromShell()`** — narrowly extracts *only* `$KUBECONFIG` from the user's interactive+login shell, when our env doesn't already have it. Looks up the user's configured login shell via `dscl . -read /Users/$USER UserShell` on macOS / `getent passwd $USER` on Linux, then falls back to `$SHELL`, `/bin/bash`, `/bin/zsh`, `/bin/sh` — dedup'd, only if the binary exists. Each candidate is run with `-ilc 'printf "%s:%s\n" "MARK" "$KUBECONFIG"'` and matched with a multiline regex against the marker; first non-empty value wins. State is kept in the `kubeconfigProbe` object so the diagnose IPC can show what happened.
+
+Critical scope: the shell probe extracts **only** `$KUBECONFIG`. Earlier iterations of this code pulled HOME/USER/PATH/AWS_*/etc.; that was rejected as "too broad, app should be self-contained". The narrow exception for `$KUBECONFIG` is defensible because it's the one variable that has no in-app alternative — many users define their multi-file kubeconfig list only in their shell rc.
+
+### Diagnostics surface
+
+`k8s:diagnose` IPC returns a snapshot of: `$KUBECONFIG` value, default path, per-file existence/size/readability, context count, kube load error, and the full `kubeconfigProbe` state (source, login shell, each per-shell attempt's shell/stdout/stderr/value/error/ms). `EmptyState` in `src/app.jsx` fetches this **only** when bootstrap has actually failed — `bootstrapState === 'error'` or `'loaded' && ctxCount === 0`. During the normal loading window it just shows a spinner. The intent is "appear only when something needs fixing".
+
+`bootstrapState` (`'loading' | 'loaded' | 'error'`) is tracked alongside `contexts` in `App` and threaded through to `EmptyState`. When you add a new failure mode for bootstrap, set the state accordingly so the diag panel can decide whether to surface itself.
+
+Set the env var `CLOUDPG_DEBUG=1` (e.g. `launchctl setenv CLOUDPG_DEBUG 1` on macOS) and packaged builds auto-open DevTools — useful when stdout/stderr go nowhere visible.
 
 ### Bootstrap unions contexts by kubernetes cluster
 
@@ -83,4 +113,4 @@ Schema-qualified completion: when the fragment contains a `.` (e.g. `public.u`),
 
 ## Outstanding non-blocking work
 
-See `TODO.md` for the architecture overview and the remaining cleanup items (TLS via cluster CA secret, vendoring React/Babel for packaging, electron-builder code-signing config).
+See `TODO.md`. Current items: TLS via cluster CA secret, code-signing (mac + win), app icon, `make watch` for dev hot-reload, wiring the min/max/close titlebar buttons on Linux/Windows.

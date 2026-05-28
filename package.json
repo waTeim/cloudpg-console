@@ -2,6 +2,7 @@
   "name": "cloudpg-console",
   "version": "0.1.0",
   "description": "Desktop psql interface for CloudNativePG (CNPG) clusters across kubernetes contexts.",
+  "author": "CloudPG Console contributors",
   "main": "electron/main.js",
   "private": true,
   "scripts": {
@@ -12,46 +13,6 @@
     "package:mac": "electron-builder --mac",
     "package:linux": "electron-builder --linux",
     "package:win": "electron-builder --win"
-  },
-  "build": {
-    "appId": "io.cloudpg.console",
-    "productName": "CloudPG Console",
-    "files": [
-      "CloudPG Console.html",
-      "styles.css",
-      "out/**/*",
-      "vendor/**/*",
-      "electron/**/*"
-    ],
-    "directories": {
-      "output": "dist",
-      "buildResources": "build"
-    },
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.developer-tools",
-      "//signing-prep": "When ready to sign + notarize, uncomment the four keys below and export the env vars listed in TODO.md (CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID).",
-      "//hardenedRuntime": true,
-      "//entitlements": "build/entitlements.mac.plist",
-      "//entitlementsInherit": "build/entitlements.mac.plist",
-      "//notarize": true
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "Development"
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    }
   },
   "devDependencies": {
     "electron": "^32.3.3",

@@ -9,6 +9,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('cloudpg', {
   k8s: {
     listContexts:     ()                       => ipcRenderer.invoke('k8s:listContexts'),
+    diagnose:         ()                       => ipcRenderer.invoke('k8s:diagnose'),
     listNamespaces:   (ctx)                    => ipcRenderer.invoke('k8s:listNamespaces', ctx),
     listCNPGClusters:  (ctx, ns)               => ipcRenderer.invoke('k8s:listCNPGClusters', ctx, ns),
     listCNPGDatabases: (ctx, ns)               => ipcRenderer.invoke('k8s:listCNPGDatabases', ctx, ns),

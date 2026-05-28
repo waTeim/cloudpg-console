@@ -54,8 +54,8 @@ make package-win       # NSIS + portable
 ## How it works
 
 ```
-Renderer (React, no bundler)               Main (Electron)
-─────────────────────────────              ───────────────
+Renderer (React, esbuild-compiled)            Main (Electron)
+─────────────────────────────────             ───────────────
 src/backend.js  bootstrap() ─┐
 src/sidebar.jsx              ├── window.cloudpg.k8s.*  ──┐
 src/palette.jsx              │                           │ IPC
@@ -63,6 +63,7 @@ src/session.jsx ─────────────┴── window.cloudpg.
                                                          │
                                                          ▼
                                               electron/main.js
+                                                ├─ $PATH + $KUBECONFIG GUI-launch fix
                                                 ├─ kubeconfig (multi-file safe)
                                                 ├─ k8s API + CRD listing
                                                 ├─ SelfSubjectAccessReview pre-flight
@@ -70,8 +71,15 @@ src/session.jsx ─────────────┴── window.cloudpg.
                                                 └─ pg.Client (per-session serialized queue)
 ```
 
-See [`CLAUDE.md`](./CLAUDE.md) for the in-depth architecture notes and [`TODO.md`](./TODO.md) for outstanding work (TLS via cluster CA, vendoring renderer scripts for offline packaging, electron-builder code-signing).
+JSX is pre-compiled to plain JS at build time (`make build` → esbuild) and React/ReactDOM are vendored from `node_modules` into `vendor/` — the renderer ships entirely local with no network on launch.
+
+See [`CLAUDE.md`](./CLAUDE.md) for the in-depth architecture notes and [`TODO.md`](./TODO.md) for outstanding work (TLS via cluster CA, electron-builder code-signing, dev hot-reload, app icon).
+
+## Troubleshooting
+
+- **Sidebar stuck at "Loading kubernetes contexts…"** — the app surfaces a Diagnostics panel right where the spinner would have been. It shows `$KUBECONFIG`, the default path, each kubeconfig file's existence + size, and what shell probe (if any) was used to find `$KUBECONFIG`. The panel only appears when bootstrap has actually failed, not during normal loading.
+- **Need to see console output from a packaged build?** Set `CLOUDPG_DEBUG=1` and packaged builds will auto-open DevTools. On macOS, `launchctl setenv CLOUDPG_DEBUG 1` makes it persist across Finder launches for the rest of the login session.
 
 ## Status
 
-Functional. Wired against real CNPG clusters end-to-end. Production hardening (TLS, signed installers, vendored renderer scripts) is tracked in `TODO.md`.
+Functional. Wired against real CNPG clusters end-to-end; packaged builds work offline (no unpkg deps). Production hardening (TLS via cluster CA, signed installers, app icon, dev hot-reload) is tracked in `TODO.md`.
