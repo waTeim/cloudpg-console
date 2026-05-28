@@ -1,6 +1,6 @@
 {
   "name": "cloudpg-console",
-  "version": "0.1.0",
+  "version": "0.9.0",
   "description": "Desktop psql interface for CloudNativePG (CNPG) clusters across kubernetes contexts.",
   "author": "CloudPG Console contributors",
   "main": "electron/main.js",
