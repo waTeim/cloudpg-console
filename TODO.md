@@ -187,11 +187,6 @@ stdout/stderr go nowhere visible.
 - **Code-signing (Windows).** Set `CSC_LINK` / `CSC_KEY_PASSWORD` to a
   Windows codesigning cert (`.p12` or `.pfx`) and re-run
   `make package-win`. EV cert avoids SmartScreen ramp-up.
-- **App icon.** No icon is configured, so `electron-builder` produces
-  installers with the default Electron logo. Drop a 512×512
-  `build/icon.png` and electron-builder auto-generates `.icns`/`.ico`
-  and the Linux variants. (The current branding gradient lives in
-  `styles.css` under `.brand .logo` if you want a starting point.)
 - **`make watch` (dev hot-reload).** `make dev` runs the build once
   then launches Electron — edits to `src/*.jsx` require restarting.
   esbuild has a watch mode that incrementally re-emits on change; add
