@@ -32,6 +32,7 @@ function flattenTargets(clusters) {
               secret:         u.secret || '',
               db:             db.name,
               phase:          cl.phase,
+              tls:            !!cl.tls,
               users:          cl.users,
               databases:      cl.databases,
               pgVersion:      cl.pgVersion,
@@ -310,6 +311,14 @@ function CommandPalette({ open, onClose, onPick, recents = [], contexts }) {
                           <span style={{ color: "var(--fg-mute)" }}>/</span>
                           <span style={{ color: "var(--accent)", fontWeight: 600 }}>{t.db}</span>
                         </span>
+                        {t.tls && (
+                          <span
+                            title="TLS available"
+                            style={{ display: "inline-flex", alignItems: "center", color: "var(--ok)", marginRight: 4 }}
+                          >
+                            <Icon name="lock" size={11} />
+                          </span>
+                        )}
                         <span className={`badge ${phaseVariant}`}><span className="dot" />{t.phase}</span>
                       </div>
                       <div className="sub">

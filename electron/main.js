@@ -353,6 +353,7 @@ ipcMain.handle('k8s:listCNPGClusters', envelope(async (_evt, contextName, namesp
   );
   return res.body.items.map(c => {
     const initdb = c.spec?.bootstrap?.initdb;
+    const certs  = c.status?.certificates || {};
     return {
       name:       c.metadata.name,
       phase:      c.status?.phase ?? 'Unknown',
@@ -360,6 +361,10 @@ ipcMain.handle('k8s:listCNPGClusters', envelope(async (_evt, contextName, namesp
       instances:  c.spec.instances,
       pgVersion:  ((c.status?.image || c.spec?.imageName || '').split(':').pop().match(/^(\d+[\d.]*)/)?.[1] ?? '?'),
       primary:    c.status?.currentPrimary,
+      // TLS-available if the operator has provisioned a server CA + SAN list.
+      // Every healthy CNPG cluster has both; absence usually means the cluster
+      // is still bootstrapping or has been manually opted out.
+      tls:        !!certs.serverCASecret && (certs.serverAltDNSNames || []).length > 0,
       // Seed with the bootstrap database (if any). Database CRs are layered
       // on top later in backend.js, and a matching CR will override the
       // initdb owner with the post-bootstrap value.
@@ -437,15 +442,37 @@ async function canPortForward(kc, namespace) {
 // Opens a local TCP server that port-forwards each connection to the
 // cluster's current primary pod on port 5432. Attaches defensive error
 // listeners so a transient WS failure can't take the main process down.
-async function openPortForward(kc, namespace, clusterName) {
-  const pf         = new k8s.PortForward(kc);
-  const customApi  = kc.makeApiClient(k8s.CustomObjectsApi);
-
-  const clusterRes = await customApi.getNamespacedCustomObject(
+// Fetch the CNPG Cluster CR once and pull out everything pg:connect needs:
+// the primary pod (for port-forward), the server-CA secret name, and the
+// list of SANs the server cert is valid for (used as TLS servername since
+// we connect via 127.0.0.1 which won't match the cert).
+async function getClusterTlsInfo(kc, namespace, clusterName) {
+  const customApi = kc.makeApiClient(k8s.CustomObjectsApi);
+  const res = await customApi.getNamespacedCustomObject(
     'postgresql.cnpg.io', 'v1', namespace, 'clusters', clusterName
   );
-  const podName = clusterRes.body.status?.currentPrimary;
+  const status = res.body.status || {};
+  const podName = status.currentPrimary;
   if (!podName) throw new Error(`No primary pod for cluster ${clusterName}`);
+  const certs = status.certificates || {};
+  return {
+    podName,
+    caSecretName: certs.serverCASecret || null,           // e.g. "postgres-cluster-ca"
+    serverAltNames: certs.serverAltDNSNames || [],         // first SAN is the cleanest servername
+  };
+}
+
+// Read the server CA from the named secret. CNPG stores PEM under "ca.crt".
+async function readServerCA(kc, namespace, secretName) {
+  if (!secretName) return null;
+  const api = kc.makeApiClient(k8s.CoreV1Api);
+  const res = await api.readNamespacedSecret(secretName, namespace);
+  const ca = res.body.data?.['ca.crt'];
+  return ca ? Buffer.from(ca, 'base64').toString('utf8') : null;
+}
+
+async function openPortForward(kc, namespace, podName) {
+  const pf = new k8s.PortForward(kc);
 
   const server = net.createServer((socket) => {
     // Prevent unhandled 'error' from killing the process if pg.Client
@@ -486,18 +513,46 @@ ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
       return { ok: false, error: `context "${contextName}" cannot port-forward in namespace "${namespace}"${pfCheck.reason ? ` (${pfCheck.reason})` : ''}` };
     }
 
-    ({ server } = await openPortForward(kc, namespace, clusterName));
+    // Discover primary pod + the cluster's TLS configuration in one shot.
+    const tls = await getClusterTlsInfo(kc, namespace, clusterName);
+
+    ({ server } = await openPortForward(kc, namespace, tls.podName));
     const localPort = server.address().port;
+
+    // Build TLS options from the cluster's published CA. The cert is issued
+    // for the -rw/-r/-ro service DNS names, not for 127.0.0.1, so we tell
+    // node:tls to validate as if connecting to the first SAN. CNPG enables
+    // TLS 1.3 by default; if the CA secret is missing or unreadable we fall
+    // back to ssl:false so non-CNPG (or partially-configured) clusters
+    // still connect — the operation surfaces in the response info.
+    let sslOpts = false;
+    let sslMode = 'disabled';
+    try {
+      const ca = await readServerCA(kc, namespace, tls.caSecretName);
+      if (ca && tls.serverAltNames.length > 0) {
+        sslOpts = {
+          ca,
+          servername: tls.serverAltNames[0],   // e.g. "postgres-cluster-rw"
+          rejectUnauthorized: true,
+        };
+        sslMode = `verified (CA=${tls.caSecretName}, servername=${tls.serverAltNames[0]})`;
+      } else {
+        sslMode = `disabled (missing ${ca ? 'serverAltDNSNames' : 'CA'})`;
+      }
+    } catch (e) {
+      sslMode = `disabled (CA read failed: ${friendlyErr(e)})`;
+    }
+
     const client = new Client({
       host: '127.0.0.1', port: localPort,
       user, password, database,
-      ssl: false,
+      ssl: sslOpts,
       connectionTimeoutMillis: 10000,
     });
     await client.connect();
     sessions.set(sessionId, { client, server, localPort });
     const vr = await client.query('SELECT version()');
-    return { ok: true, info: { server: vr.rows[0].version } };
+    return { ok: true, info: { server: vr.rows[0].version, tls: sslMode } };
   } catch (e) {
     try { server?.close(); } catch (_) {}
     return { ok: false, error: friendlyErr(e) };

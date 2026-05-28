@@ -18,6 +18,10 @@ const Icon = ({ name, size = 14, stroke = 1.6, ...rest }) => {
       return <svg {...common}><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>;
     case "x":
       return <svg {...common}><path d="M6 6l12 12M6 18L18 6" /></svg>;
+    case "lock":
+      return <svg {...common}><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 1 1 8 0v3" /></svg>;
+    case "lock-open":
+      return <svg {...common}><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 0 1 7.5-2" /></svg>;
     case "plus":
       return <svg {...common}><path d="M12 5v14M5 12h14" /></svg>;
     case "min":

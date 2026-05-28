@@ -12,6 +12,7 @@ If you operate Postgres on Kubernetes via CNPG across more than one cluster, the
 
 - **Cross-context inventory.** Discovers `postgresql.cnpg.io/v1 Cluster` and `Database` resources across every reachable kube context, unioned by kubernetes cluster (so the same `icecream` cluster reachable via two different contexts appears once, with the union of namespaces/users that any context can see).
 - **One-click connect.** Reads the `cnpg-<cluster>-user-<name>` secret, opens a port-forward to `status.currentPrimary`, and connects a real `pg.Client`. If your first context lacks `pods/portforward` RBAC, it falls back to other contexts that can reach the same cluster.
+- **End-to-end TLS.** The postgres connection does full TLS 1.3 validation against the cluster's CNPG-managed CA (`status.certificates.serverCASecret`) with hostname verification against the cert's SANs — not just an encrypted-but-unverified tunnel. Falls back to plaintext only when the cluster doesn't publish a CA. A lock badge in the sidebar, palette, and breadcrumb reflects the state at a glance.
 - **psql-style REPL.** Real SQL goes to the live connection (transactions stay on one client). Client-side `\dt`, `\dv`, `\df`, `\dn`, `\du`, `\l`, `\d [schema.]name`, `\?`, `\timing`, `\x`, `\q` work off a cached `pg_catalog` introspection.
 - **Bash-style tab completion.** Single-Tab completes uniquely or extends to the longest common prefix; double-Tab shows the list. Schema-qualified completion (`select * from public.u<tab>`) works.
 - **Command palette.** ⌘K opens a fuzzy switcher across every (cluster, namespace, db, user) target with facet filters.
@@ -73,7 +74,7 @@ src/session.jsx ─────────────┴── window.cloudpg.
 
 JSX is pre-compiled to plain JS at build time (`make build` → esbuild) and React/ReactDOM are vendored from `node_modules` into `vendor/` — the renderer ships entirely local with no network on launch.
 
-See [`CLAUDE.md`](./CLAUDE.md) for the in-depth architecture notes and [`TODO.md`](./TODO.md) for outstanding work (TLS via cluster CA, electron-builder code-signing, dev hot-reload, app icon).
+See [`CLAUDE.md`](./CLAUDE.md) for the in-depth architecture notes and [`TODO.md`](./TODO.md) for outstanding work (electron-builder code-signing, dev hot-reload).
 
 ## Troubleshooting
 
@@ -82,4 +83,4 @@ See [`CLAUDE.md`](./CLAUDE.md) for the in-depth architecture notes and [`TODO.md
 
 ## Status
 
-Functional. Wired against real CNPG clusters end-to-end; packaged builds work offline (no unpkg deps). Production hardening (TLS via cluster CA, signed installers, app icon, dev hot-reload) is tracked in `TODO.md`.
+Functional. Wired against real CNPG clusters end-to-end; packaged builds work offline (no unpkg deps); postgres connections do full TLS 1.3 validation against the cluster's CA. Remaining production polish (signed installers, dev hot-reload) is tracked in `TODO.md`.

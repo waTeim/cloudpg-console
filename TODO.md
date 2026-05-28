@@ -160,10 +160,6 @@ stdout/stderr go nowhere visible.
 
 ## Notes / gotchas
 
-- **TLS.** The `pg.Client` is created with `ssl: false`. Fine for local
-  dev where you trust the port-forward. For production, fetch the CA
-  from the cluster's `<cluster>-ca` secret and use
-  `ssl: { ca, rejectUnauthorized: true }`.
 - **Multiple kubeconfigs with duplicate cluster names.** `loadFromDefault`
   throws on collisions; `loadKubeconfigSafe()` in `main.js` falls back
   to per-file load with name-deduplication (first wins).

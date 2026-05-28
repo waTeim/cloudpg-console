@@ -53,16 +53,26 @@ async function doConnect(id, target, updateTabFn) {
       const pgVersion = (result.info?.server || '').match(/PostgreSQL\s+([\d.]+)/)?.[1]
         || target.pgVersion || '?';
 
+      const tlsInfo = result.info?.tls;
+      const welcomeLog = [
+        { kind: 'welcome', text: result.info?.server || 'Connected' },
+        { kind: 'welcome', text: `Connected to database "${target.db}" as "${creds.username || target.user}" via ${ctx}.` },
+      ];
+      if (tlsInfo) {
+        welcomeLog.push({
+          kind:  tlsInfo.startsWith('verified') ? 'ok' : 'notice',
+          text:  `TLS: ${tlsInfo}`,
+        });
+      }
+      welcomeLog.push({ kind: 'notice', text: 'Type "\\?" for help.' });
+
       updateTabFn(id, {
         connected:    true,
         context:      ctx,
         pgVersion,
         allDatabases,
-        log: [
-          { kind: 'welcome', text: result.info?.server || 'Connected' },
-          { kind: 'welcome', text: `Connected to database "${target.db}" as "${creds.username || target.user}" via ${ctx}.` },
-          { kind: 'notice',  text: 'Type "\\?" for help.' },
-        ],
+        tlsActive:    tlsInfo || null,   // 'verified (...)', 'disabled (...)', etc.
+        log: welcomeLog,
       });
       window.backend.introspect(id, target.db);
       return;
@@ -175,10 +185,29 @@ function Breadcrumb({ tab }) {
         <span className="val">{tab.namespace}</span>
       </span>
       <span className="bc-sep">/</span>
-      <span className="bc-chip" title="CNPG cluster">
+      <span
+        className="bc-chip"
+        title={
+          tab.tlsActive
+            ? `CNPG cluster · ${tab.tlsActive}`
+            : tab.tls
+              ? "CNPG cluster · TLS available"
+              : "CNPG cluster"
+        }
+      >
         <Icon name="db" size={11} />
         <span className="lab">pg</span>
         <span className="val">{tab.cluster}</span>
+        {(tab.tlsActive || tab.tls) && (
+          <Icon
+            name="lock"
+            size={10}
+            style={{
+              marginLeft: 4,
+              color: tab.tlsActive?.startsWith("verified") ? "var(--ok)" : "var(--fg-mute)",
+            }}
+          />
+        )}
       </span>
       <span className="bc-sep">/</span>
       <span className="bc-chip" title="Database">
@@ -516,6 +545,7 @@ function App() {
         secret:         target.secret || '',
         db:             target.db,
         phase:          target.phase || 'Unknown',
+        tls:            !!target.tls,
         pgVersion:      target.pgVersion || '?',
         ready:          target.ready  ?? 0,
         instances:      target.instances ?? 0,

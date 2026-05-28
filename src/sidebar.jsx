@@ -390,7 +390,19 @@ function Sidebar({
                             glyph={<Icon name="db" size={13} />}
                             label={highlight(cl.name, segments)}
                             meta={`${cl.ready}/${cl.instances}`}
-                            indicator={<PhaseBadge phase={cl.phase} compact />}
+                            indicator={
+                              <>
+                                {cl.tls && (
+                                  <span
+                                    title="TLS available (CNPG-managed server certificate)"
+                                    style={{ display: "inline-flex", alignItems: "center", color: "var(--ok)", marginRight: 4 }}
+                                  >
+                                    <Icon name="lock" size={11} />
+                                  </span>
+                                )}
+                                <PhaseBadge phase={cl.phase} compact />
+                              </>
+                            }
                             onToggle={() => toggleSet(openCl, clKey, setOpenCl)}
                             onClick={() => toggleSet(openCl, clKey, setOpenCl)}
                           />
@@ -462,6 +474,7 @@ function Sidebar({
                                             secret:         u.secret || '',
                                             db:             dbName,
                                             phase:          cl.phase,
+                                            tls:            !!cl.tls,
                                             pgVersion:      cl.pgVersion,
                                             ready:          cl.ready,
                                             instances:      cl.instances,

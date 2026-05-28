@@ -79,12 +79,14 @@ Set the env var `CLOUDPG_DEBUG=1` (e.g. `launchctl setenv CLOUDPG_DEBUG 1` on ma
 
 If you change the bootstrap shape, the consumers that need updating are `src/sidebar.jsx` (iteration + `onOpenSession` target), `src/palette.jsx` (`flattenTargets`), and `doConnect` in `src/app.jsx`.
 
-### Connection path: SSAR → port-forward → pg.Client
+### Connection path: SSAR → port-forward → pg.Client (TLS)
 
 `pg:connect` in `main.js`:
 1. `canPortForward()` does a `SelfSubjectAccessReview` for `pods/portforward` in the target namespace and returns `{ok:false, error}` immediately on denial — this is what prevents the unhandled WebSocket-403 that would otherwise crash the main process.
-2. `openPortForward()` reads `cluster.status.currentPrimary`, opens a `net.createServer` that pipes each TCP socket through `k8s.PortForward`, and attaches *defensive* `error` listeners on the socket, the WS, and the listening server. The `@kubernetes/client-node` `once`-style error handler is unreliable across the WebSocket's two lifecycle events; our listeners catch the leftover.
-3. A `pg.Client` connects to `127.0.0.1:<localPort>` with `ssl: false`.
+2. `getClusterTlsInfo()` fetches the CNPG `Cluster` CR once and extracts `status.currentPrimary` (for port-forwarding), `status.certificates.serverCASecret` (the CA), and `status.certificates.serverAltDNSNames` (the SANs the server cert was issued for). One CR fetch covers both port-forward and TLS setup.
+3. `openPortForward()` opens a `net.createServer` that pipes each TCP socket through `k8s.PortForward`, with *defensive* `error` listeners on the socket, the WS, and the listening server. The `@kubernetes/client-node` `once`-style error handler is unreliable across the WebSocket's two lifecycle events; our listeners catch the leftover.
+4. `readServerCA()` base64-decodes `ca.crt` from the secret.
+5. `pg.Client` connects to `127.0.0.1:<localPort>` with `ssl: { ca, servername: serverAltNames[0], rejectUnauthorized: true }`. The `servername` override is necessary because the cert's SANs are the in-cluster service DNS names (e.g. `postgres-cluster-rw`), not `127.0.0.1`; we tell node:tls to validate as if connecting to that host. If the CA or SAN list is missing (non-CNPG cluster, partially-configured CR), we fall back to `ssl: false` and record the reason. The response's `info.tls` field reports `"verified (CA=…, servername=…)"` or `"disabled (…)"` so the renderer can render the breadcrumb's TLS lock badge in the correct color.
 
 There's also a process-level `uncaughtException` / `unhandledRejection` handler as a final backstop.
 
@@ -113,4 +115,4 @@ Schema-qualified completion: when the fragment contains a `.` (e.g. `public.u`),
 
 ## Outstanding non-blocking work
 
-See `TODO.md`. Current items: TLS via cluster CA secret, code-signing (mac + win), app icon, `make watch` for dev hot-reload, wiring the min/max/close titlebar buttons on Linux/Windows.
+See `TODO.md`. Current items: code-signing (mac + win), `make watch` for dev hot-reload, wiring the min/max/close titlebar buttons on Linux/Windows.
