@@ -422,6 +422,80 @@ ipcMain.handle('k8s:readUserSecret', envelope(async (_evt, contextName, namespac
 // ─────────────────────────────────────────────────────────────────
 
 const sessions = new Map();
+const PG_DEBUG = process.env.CLOUDPG_PG_DEBUG === '1';
+
+function formatDebugValue(v) {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'string') return v.includes(' ') ? JSON.stringify(v) : v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try { return JSON.stringify(v); } catch (_) { return String(v); }
+}
+
+function pgDebug(sessionId, event, detail = {}) {
+  if (!PG_DEBUG) return;
+  const payload = { sessionId, ...detail };
+  const fields = Object.entries(payload)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${formatDebugValue(v)}`)
+    .join(' ');
+  console.warn(`[cloudpg:pg] ${event}${fields ? ` ${fields}` : ''}`);
+}
+
+function pfDebug(event, detail = {}) {
+  if (!PG_DEBUG) return;
+  const fields = Object.entries(detail)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${formatDebugValue(v)}`)
+    .join(' ');
+  console.warn(`[cloudpg:pf] ${event}${fields ? ` ${fields}` : ''}`);
+}
+
+function pgClientState(client) {
+  if (!client) return { hasClient: false };
+  const stream = client.connection?.stream;
+  return {
+    hasClient: true,
+    connected: client._connected,
+    ending: client._ending,
+    queryable: client._queryable,
+    streamDestroyed: stream?.destroyed,
+    streamReadyState: stream?.readyState,
+    streamReadable: stream?.readable,
+    streamWritable: stream?.writable,
+  };
+}
+
+function closeSessionResources(s) {
+  try { s?.client?.removeAllListeners?.(); } catch (_) {}
+  try { s?.client?.end?.(); } catch (_) {}
+  try { s?.server?.close?.(); } catch (_) {}
+}
+
+function markSessionDisconnected(s, reason) {
+  if (!s) return;
+  s.connected = false;
+  s.lastError = reason;
+  try { s.client?.connection?.stream?.destroy?.(); } catch (_) {}
+}
+
+function isDisconnectErr(e) {
+  const code = e?.code || '';
+  const msg = String(e?.message || e || '').toLowerCase();
+  return [
+    '57P01', '57P02', '57P03',
+    '08000', '08003', '08006', '08001', '08004', '08007', '08P01',
+    'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'ENOTFOUND',
+  ].includes(code)
+    || /terminating connection|connection terminated|client has encountered a connection error|connection ended unexpectedly|socket hang up|read econnreset|write epipe|server closed the connection|no connection to the server|connection is closed|closed the connection/.test(msg);
+}
+
+function isClientUsable(client) {
+  return !!client
+    && client._connected === true
+    && client._ending !== true
+    && client._queryable !== false
+    && client.connection?.stream?.destroyed !== true;
+}
 
 // Ask the API server whether the current context is allowed to create a
 // pods/portforward in the namespace. Detects RBAC denial *before* we open
@@ -471,41 +545,77 @@ async function readServerCA(kc, namespace, secretName) {
   return ca ? Buffer.from(ca, 'base64').toString('utf8') : null;
 }
 
-async function openPortForward(kc, namespace, podName) {
+async function openPortForward(kc, namespace, podName, onTunnelClose = null) {
   const pf = new k8s.PortForward(kc);
+  const links = new Set();
+
+  const closeLink = (link, reason, cause) => {
+    if (!links.has(link)) return;
+    links.delete(link);
+    pfDebug('link:close', { reason, error: cause ? friendlyErr(cause) : null });
+    try { link.ws?.close?.(); } catch (_) {}
+    try { link.socket?.destroy?.(); } catch (_) {}
+    onTunnelClose?.(reason);
+  };
 
   const server = net.createServer((socket) => {
+    const link = { socket, ws: null };
+    links.add(link);
+
     // Prevent unhandled 'error' from killing the process if pg.Client
     // disconnects rudely or the WS folds underneath us.
-    socket.on('error', (e) => { console.warn('[pf socket]', friendlyErr(e)); });
+    socket.on('error', (e) => closeLink(link, 'local socket error', e));
+    socket.on('end', () => closeLink(link, 'local socket ended'));
+    socket.on('close', () => closeLink(link, 'local socket closed'));
+
     pf.portForward(namespace, podName, [5432], socket, null, socket)
       .then((ws) => {
-        if (ws && typeof ws.on === 'function') {
-          ws.on('error', (e) => {
-            console.warn('[pf ws]', friendlyErr(e));
-            try { socket.destroy(); } catch (_) {}
-          });
+        link.ws = ws;
+        if (!ws) return;
+
+        const onClose = (code, reason) => {
+          const msg = reason ? `port-forward websocket closed (${code}: ${reason})`
+                             : `port-forward websocket closed (${code ?? 'unknown'})`;
+          closeLink(link, msg);
+        };
+        const onError = (e) => closeLink(link, 'port-forward websocket error', e);
+        const onUnexpected = (_req, res) => closeLink(link, `port-forward unexpected response ${res?.statusCode || ''}`.trim());
+
+        if (typeof ws.on === 'function') {
+          ws.on('close', onClose);
+          ws.on('error', onError);
+          ws.on('unexpected-response', onUnexpected);
+        } else {
+          const prevClose = ws.onclose;
+          const prevError = ws.onerror;
+          ws.onclose = (ev) => { try { prevClose?.call(ws, ev); } finally { onClose(ev?.code, ev?.reason); } };
+          ws.onerror = (ev) => { try { prevError?.call(ws, ev); } finally { onError(ev?.error || ev); } };
         }
       })
-      .catch((err) => {
-        console.warn('[pf]', friendlyErr(err));
-        try { socket.destroy(); } catch (_) {}
-      });
+      .catch((err) => closeLink(link, 'port-forward setup failed', err));
   });
-  server.on('error', (e) => console.warn('[pf server]', friendlyErr(e)));
+  server.on('error', (e) => pfDebug('server:error', { error: friendlyErr(e) }));
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
 
-  return { server, localPort: server.address().port };
+  const closeAll = () => {
+    for (const link of [...links]) closeLink(link, 'port-forward server closed');
+  };
+  server.on('close', closeAll);
+
+  return { server, localPort: server.address().port, links };
 }
 
 ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
   const { contextName, namespace, clusterName, user, password, database } = opts;
   let server;
+  let client;
+  let session;
   try {
+    pgDebug(sessionId, 'connect:start', { contextName, namespace, clusterName, user, database });
     const kc = makeKc(contextName);
 
     const pfCheck = await canPortForward(kc, namespace);
@@ -516,7 +626,12 @@ ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
     // Discover primary pod + the cluster's TLS configuration in one shot.
     const tls = await getClusterTlsInfo(kc, namespace, clusterName);
 
-    ({ server } = await openPortForward(kc, namespace, tls.podName));
+    ({ server } = await openPortForward(kc, namespace, tls.podName, (reason) => {
+      if (session) {
+        pgDebug(sessionId, 'portforward:closed', { reason, state: pgClientState(client) });
+        markSessionDisconnected(session, reason);
+      }
+    }));
     const localPort = server.address().port;
 
     // Build TLS options from the cluster's published CA. The cert is issued
@@ -543,18 +658,48 @@ ipcMain.handle('pg:connect', async (_evt, sessionId, opts) => {
       sslMode = `disabled (CA read failed: ${friendlyErr(e)})`;
     }
 
-    const client = new Client({
+    client = new Client({
       host: '127.0.0.1', port: localPort,
       user, password, database,
       ssl: sslOpts,
       connectionTimeoutMillis: 10000,
     });
+    session = { client, server, localPort, connected: true, lastError: null };
+    client.on('error', (e) => {
+      session.connected = false;
+      session.lastError = friendlyErr(e);
+      pgDebug(sessionId, 'client:error', {
+        error: session.lastError,
+        code: e?.code,
+        state: pgClientState(client),
+      });
+    });
+    client.on('end', () => {
+      session.connected = false;
+      session.lastError = session.lastError || 'connection ended';
+      pgDebug(sessionId, 'client:end', { state: pgClientState(client) });
+    });
     await client.connect();
-    sessions.set(sessionId, { client, server, localPort });
+    pgDebug(sessionId, 'connect:client-connected', { localPort, state: pgClientState(client) });
     const vr = await client.query('SELECT version()');
+    const prior = sessions.get(sessionId);
+    if (prior) {
+      pgDebug(sessionId, 'connect:replace-prior', { prior: pgClientState(prior.client) });
+      closeSessionResources(prior);
+    }
+    sessions.set(sessionId, session);
+    pgDebug(sessionId, 'connect:ok', { localPort, tls: sslMode, state: pgClientState(client) });
     return { ok: true, info: { server: vr.rows[0].version, tls: sslMode } };
   } catch (e) {
+    pgDebug(sessionId, 'connect:failed', {
+      error: friendlyErr(e),
+      code: e?.code,
+      state: pgClientState(client),
+    });
+    try { await client?.end(); } catch (_) {}
     try { server?.close(); } catch (_) {}
+    const cur = sessions.get(sessionId);
+    if (cur && cur.client === client) sessions.delete(sessionId);
     return { ok: false, error: friendlyErr(e) };
   }
 });
@@ -572,10 +717,34 @@ function chain(s, fn) {
 
 ipcMain.handle('pg:query', async (_evt, sessionId, sql) => {
   const s = sessions.get(sessionId);
-  if (!s) return { error: 'no session' };
+  const sqlPreview = String(sql || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!s) {
+    pgDebug(sessionId, 'query:no-session', { sql: sqlPreview });
+    return { error: 'no session', disconnected: true, retriable: true };
+  }
+  if (!s.connected || !isClientUsable(s.client)) {
+    s.connected = false;
+    pgDebug(sessionId, 'query:unusable-before-send', {
+      error: s.lastError || 'connection is not active',
+      sql: sqlPreview,
+      state: pgClientState(s.client),
+    });
+    return {
+      error: s.lastError || 'connection is not active',
+      disconnected: true,
+      retriable: true,
+    };
+  }
   return chain(s, async () => {
     try {
+      pgDebug(sessionId, 'query:send', { sql: sqlPreview, state: pgClientState(s.client) });
       const res = await s.client.query(sql);
+      pgDebug(sessionId, 'query:ok', {
+        sql: sqlPreview,
+        command: res.command,
+        rowCount: res.rowCount,
+        state: pgClientState(s.client),
+      });
       return {
         command:  res.command,
         rowCount: res.rowCount,
@@ -583,22 +752,55 @@ ipcMain.handle('pg:query', async (_evt, sessionId, sql) => {
         rows:     res.rows,
       };
     } catch (e) {
-      return { error: e.message, where: e.where, code: e.code };
+      const disconnected = isDisconnectErr(e) || !isClientUsable(s.client);
+      if (disconnected) {
+        markSessionDisconnected(s, friendlyErr(e));
+      }
+      pgDebug(sessionId, disconnected ? 'query:disconnect-error' : 'query:error', {
+        sql: sqlPreview,
+        error: friendlyErr(e),
+        code: e?.code,
+        disconnected,
+        state: pgClientState(s.client),
+      });
+      return {
+        error: e.message,
+        where: e.where,
+        code: e.code,
+        disconnected,
+        retriable: disconnected,
+      };
     }
   });
 });
 
+ipcMain.handle('pg:status', async (_evt, sessionId) => {
+  const s = sessions.get(sessionId);
+  if (!s) {
+    pgDebug(sessionId, 'status:no-session');
+    return { connected: false, error: 'no session' };
+  }
+  const connected = !!s.connected && isClientUsable(s.client);
+  if (!connected) s.connected = false;
+  if (!connected || s.lastError) {
+    pgDebug(sessionId, 'status', { connected, error: s.lastError || null, state: pgClientState(s.client) });
+  }
+  return { connected, error: s.lastError || null };
+});
+
 ipcMain.handle('pg:disconnect', async (_evt, sessionId) => {
   const s = sessions.get(sessionId);
-  if (!s) return;
-  try { await s.client?.end(); } catch (_) {}
-  try { s.server?.close(); } catch (_) {}
+  if (!s) {
+    pgDebug(sessionId, 'disconnect:no-session');
+    return;
+  }
+  pgDebug(sessionId, 'disconnect', { state: pgClientState(s.client) });
+  closeSessionResources(s);
   sessions.delete(sessionId);
 });
 
 app.on('before-quit', async () => {
   for (const [id, s] of sessions) {
-    try { await s.client?.end(); } catch (_) {}
-    try { s.server?.close(); } catch (_) {}
+    closeSessionResources(s);
   }
 });

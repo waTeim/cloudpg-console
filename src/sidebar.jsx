@@ -54,6 +54,29 @@ function PhaseBadge({ phase, compact = false }) {
   );
 }
 
+function SessionStatusBadge({ status }) {
+  if (!status) return null;
+  const state = status.state || 'connecting';
+  const variant = state === 'failed' ? 'err'
+    : state === 'connected' ? 'ok'
+    : 'warn';
+  const label = state === 'failed' ? 'FAIL'
+    : state === 'waiting' ? 'WAIT'
+    : state === 'reconnecting' ? `R${status.attempt || 1}/${status.max || 5}`
+    : state === 'connecting' ? 'CONN'
+    : state.toUpperCase().slice(0, 4);
+  const wait = status.delayMs ? `\nnext attempt in ${Math.round(status.delayMs / 1000)}s` : '';
+  return (
+    <span
+      className={`badge ${variant} session-status`}
+      title={`Session ${state}${status.attempt ? ` (${status.attempt}/${status.max})` : ''}${wait}${status.reason ? `\n${status.reason}` : ''}`}
+    >
+      <span className="dot" />
+      {label}
+    </span>
+  );
+}
+
 function TreeRow({
   depth = 0, open, hasChildren, glyph, label, meta, selected,
   onClick, onToggle, indicator, secondary,
@@ -84,6 +107,7 @@ function Sidebar({
   width, onResize, onCollapse,
   onOpenSession,
   highlightKey,
+  sessionStatuses = {},
   onRefresh,
   hideEmptyNs = true,
 }) {
@@ -456,8 +480,10 @@ function Sidebar({
                                       </div>
                                     )}
                                     {userOpen && userDbs.map(dbName => {
+                                      const rowKey = `${cn}::${n.name}::${cl.name}::${u.name}::${dbName}`;
                                       const isHighlight = highlightKey ===
-                                        `${cn}::${n.name}::${cl.name}::${u.name}::${dbName}`;
+                                        rowKey;
+                                      const sessionStatus = sessionStatuses[rowKey];
                                       return (
                                         <div
                                           key={dbName}
@@ -486,6 +512,7 @@ function Sidebar({
                                           <span className="chev is-leaf"><Icon name="chev-right" size={12} /></span>
                                           <span className="glyph"><Icon name="db" size={12} /></span>
                                           <span className="label">{highlight(dbName, segments)}</span>
+                                          <SessionStatusBadge status={sessionStatus} />
                                           <span className="meta" style={{ color: "var(--fg-faint)" }}>
                                             {dbName === "postgres" || dbName === "template1" ? "system" : "db"}
                                           </span>

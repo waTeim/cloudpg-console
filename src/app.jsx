@@ -12,28 +12,61 @@ const {
 
 const RECENT_KEY  = "cloudpg.recents";
 const TWEAK_DEFAULTS = { theme: "paper", sidebarWidth: 280, hideEmptyNs: true };
+const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function formatDebugValue(v) {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === "string") return v.includes(" ") ? JSON.stringify(v) : v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try { return JSON.stringify(v); } catch (_) { return String(v); }
+}
+
+function pgUiDebug(event, detail = {}) {
+  if (!window.cloudpg?.debug?.pg) return;
+  const fields = Object.entries(detail)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${formatDebugValue(v)}`)
+    .join(" ");
+  console.warn(`[cloudpg:pg-ui] ${event}${fields ? ` ${fields}` : ""}`);
+}
+window.pgUiDebug = pgUiDebug;
 
 // Kick off a real postgres connect in the background after the tab is created.
 // Walks through every context that can reach this target (from the union
 // bootstrap) and uses the first one that successfully connects. This means a
 // context lacking pods/portforward RBAC silently falls back to a peer that
 // has it, instead of failing the whole target.
-async function doConnect(id, target, updateTabFn) {
+async function doConnect(id, target, updateTabFn, opts = {}) {
+  const isReconnect = !!opts.reconnect;
   const contexts = (target.contextOptions && target.contextOptions.length)
     ? target.contextOptions
     : [target.context].filter(Boolean);
 
   const attempts = [];
+  pgUiDebug(isReconnect ? 'connect:reconnect-start' : 'connect:start', {
+    id,
+    key: target.key,
+    contexts,
+    namespace: target.namespace,
+    cluster: target.cluster,
+    user: target.user,
+    db: target.db,
+  });
   for (const ctx of contexts) {
     try {
       const secretName = target.secret || `cnpg-${target.cluster}-user-${target.user}`;
+      pgUiDebug('connect:read-secret', { id, ctx, secretName });
       const credsRes = await window.cloudpg.k8s.readUserSecret(ctx, target.namespace, secretName);
       if (!credsRes || !credsRes.ok) {
+        pgUiDebug('connect:read-secret-failed', { id, ctx, error: credsRes?.error || 'unknown' });
         attempts.push(`${ctx}: read secret — ${credsRes?.error || 'unknown'}`);
         continue;
       }
       const creds = credsRes.data;
 
+      pgUiDebug('connect:ipc-connect', { id, ctx, database: target.db });
       const result = await window.cloudpg.pg.connect(id, {
         contextName: ctx,
         namespace:   target.namespace,
@@ -43,12 +76,15 @@ async function doConnect(id, target, updateTabFn) {
         database:    target.db,
       });
       if (!result.ok) {
+        pgUiDebug('connect:ipc-connect-failed', { id, ctx, error: result.error });
         attempts.push(`${ctx}: ${result.error}`);
         continue;
       }
+      pgUiDebug('connect:ipc-connect-ok', { id, ctx, info: result.info });
 
       const dbsRes = await window.cloudpg.pg.query(id,
         "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname");
+      if (dbsRes.error) pgUiDebug('connect:list-databases-error', { id, ctx, error: dbsRes.error, disconnected: dbsRes.disconnected });
       const allDatabases = dbsRes.rows ? dbsRes.rows.map(r => r.datname) : [target.db];
       const pgVersion = (result.info?.server || '').match(/PostgreSQL\s+([\d.]+)/)?.[1]
         || target.pgVersion || '?';
@@ -66,17 +102,22 @@ async function doConnect(id, target, updateTabFn) {
       }
       welcomeLog.push({ kind: 'notice', text: 'Type "\\?" for help.' });
 
-      updateTabFn(id, {
+      const patch = {
         connected:    true,
+        connectionState: 'connected',
+        reconnect:    null,
         context:      ctx,
         pgVersion,
         allDatabases,
         tlsActive:    tlsInfo || null,   // 'verified (...)', 'disabled (...)', etc.
-        log: welcomeLog,
-      });
-      window.backend.introspect(id, target.db);
-      return;
+      };
+      if (!isReconnect) patch.log = welcomeLog;
+      updateTabFn(id, patch);
+      if (!isReconnect) window.backend.introspect(id, target.db);
+      pgUiDebug(isReconnect ? 'connect:reconnect-ok' : 'connect:ok', { id, ctx, key: target.key });
+      return { ok: true };
     } catch (err) {
+      pgUiDebug('connect:exception', { id, ctx, error: err.message || String(err) });
       attempts.push(`${ctx}: ${err.message || err}`);
     }
   }
@@ -84,7 +125,15 @@ async function doConnect(id, target, updateTabFn) {
   const summary = contexts.length > 1
     ? `Failed via all ${contexts.length} available contexts:\n  ${attempts.join('\n  ')}`
     : (attempts[0] || 'no contexts available');
-  updateTabFn(id, { log: [{ kind: 'error', text: summary }] });
+  if (!isReconnect) {
+    updateTabFn(id, {
+      connected: false,
+      connectionState: 'failed',
+      log: [{ kind: 'error', text: summary }],
+    });
+  }
+  pgUiDebug(isReconnect ? 'connect:reconnect-failed' : 'connect:failed', { id, summary });
+  return { ok: false, error: summary };
 }
 
 function Titlebar() {
@@ -478,6 +527,9 @@ function App() {
   const [tabs, setTabs] = aUseState([]);
   const [activeId, setActiveId] = aUseState(null);
   const [paletteOpen, setPaletteOpen] = aUseState(false);
+  const tabsRef = aUseRef([]);
+  const reconnectingRef = aUseRef(new Map());
+  aUseEffect(() => { tabsRef.current = tabs; }, [tabs]);
 
   const [recents, setRecentsRaw] = aUseState(() => {
     try {
@@ -498,6 +550,7 @@ function App() {
   const updateTabRef = aUseRef(null);
 
   const closeTab = aUseCallback((id) => {
+    reconnectingRef.current.delete(id);
     window.cloudpg?.pg?.disconnect(id).catch(() => {});
     setTabs(prev => {
       const idx  = prev.findIndex(tab => tab.id === id);
@@ -512,10 +565,121 @@ function App() {
 
   const updateTabWithClose = aUseCallback((id, patch) => {
     if (patch && patch._close) { closeTab(id); return; }
-    setTabs(prev => prev.map(tab => tab.id === id ? { ...tab, ...patch } : tab));
+    setTabs(prev => prev.map(tab => {
+      if (tab.id !== id) return tab;
+      const nextPatch = typeof patch === "function" ? patch(tab) : patch;
+      if (nextPatch && nextPatch._close) {
+        setTimeout(() => closeTab(id), 0);
+        return tab;
+      }
+      return { ...tab, ...(nextPatch || {}) };
+    }));
   }, [closeTab]);
 
   updateTabRef.current = updateTabWithClose;
+
+  const reconnectSession = aUseCallback(async (id, reason) => {
+    const existing = reconnectingRef.current.get(id);
+    if (existing) {
+      pgUiDebug('reconnect:join-existing', { id, reason });
+      return existing;
+    }
+
+    const promise = (async () => {
+      pgUiDebug('reconnect:start', { id, reason });
+      updateTabRef.current(id, (tab) => ({
+        connected: false,
+        connectionState: 'reconnecting',
+        reconnect: { state: 'reconnecting', attempt: 1, max: RECONNECT_DELAYS.length, delayMs: 0, reason },
+        log: [
+          ...(tab.log || []),
+          { kind: 'notice', text: `Connection lost${reason ? `: ${reason}` : ''}. Reconnecting…` },
+        ],
+      }));
+
+      try {
+        pgUiDebug('reconnect:disconnect-stale', { id });
+        await window.cloudpg.pg.disconnect(id);
+      } catch (e) {
+        pgUiDebug('reconnect:disconnect-stale-error', { id, error: e.message || String(e) });
+      }
+
+      let lastError = reason || 'connection lost';
+      for (let i = 0; i < RECONNECT_DELAYS.length; i++) {
+        const attempt = i + 1;
+        const delayMs = i === 0 ? 0 : RECONNECT_DELAYS[i - 1];
+        if (delayMs > 0) {
+          pgUiDebug('reconnect:wait', { id, attempt, delayMs, lastError });
+          updateTabRef.current(id, {
+            connectionState: 'waiting',
+            reconnect: { state: 'waiting', attempt, max: RECONNECT_DELAYS.length, delayMs, reason: lastError },
+          });
+          await sleep(delayMs);
+        }
+
+        const tab = tabsRef.current.find(t => t.id === id);
+        if (!tab) {
+          pgUiDebug('reconnect:tab-missing', { id, attempt });
+          return { ok: false, error: 'session closed' };
+        }
+
+        pgUiDebug('reconnect:attempt', { id, attempt, key: tab.key, context: tab.context, contextOptions: tab.contextOptions });
+        updateTabRef.current(id, {
+          connectionState: 'reconnecting',
+          reconnect: { state: 'reconnecting', attempt, max: RECONNECT_DELAYS.length, delayMs: 0, reason: lastError },
+        });
+
+        const result = await doConnect(id, tab, (tabId, patch) => updateTabRef.current(tabId, patch), { reconnect: true });
+        if (result.ok) {
+          pgUiDebug('reconnect:ok', { id, attempt });
+          updateTabRef.current(id, (current) => ({
+            connected: true,
+            connectionState: 'connected',
+            reconnect: null,
+            log: [...(current.log || []), { kind: 'ok', text: `Reconnected on attempt ${attempt}.` }],
+          }));
+          return { ok: true };
+        }
+        lastError = result.error || lastError;
+        pgUiDebug('reconnect:attempt-failed', { id, attempt, error: lastError });
+      }
+
+      pgUiDebug('reconnect:failed', { id, error: lastError });
+      updateTabRef.current(id, (tab) => ({
+        connected: false,
+        connectionState: 'failed',
+        reconnect: { state: 'failed', attempt: RECONNECT_DELAYS.length, max: RECONNECT_DELAYS.length, delayMs: 0, reason: lastError },
+      }));
+      return { ok: false, error: lastError };
+    })().finally(() => {
+      pgUiDebug('reconnect:finished', { id });
+      reconnectingRef.current.delete(id);
+    });
+
+    reconnectingRef.current.set(id, promise);
+    return promise;
+  }, []);
+
+  aUseEffect(() => {
+    const poll = async () => {
+      for (const tab of tabsRef.current) {
+        if (!tab.connected || tab.connectionState !== 'connected') continue;
+        if (reconnectingRef.current.has(tab.id)) continue;
+        try {
+          const status = await window.cloudpg.pg.status(tab.id);
+          if (status && status.connected === false) {
+            pgUiDebug('status:disconnected', { id: tab.id, key: tab.key, error: status.error });
+            reconnectSession(tab.id, status.error || 'connection lost');
+          }
+        } catch (e) {
+          pgUiDebug('status:error', { id: tab.id, key: tab.key, error: e.message || String(e) });
+          reconnectSession(tab.id, e.message || 'status check failed');
+        }
+      }
+    };
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, [reconnectSession]);
 
   const openSession = aUseCallback((target) => {
     const kubeCluster = target.kubeCluster || target.context;
@@ -551,6 +715,9 @@ function App() {
         instances:      target.instances ?? 0,
         allUsers:       target.users || [],
         allDatabases:   [target.db],
+        connected:      false,
+        connectionState: 'connecting',
+        reconnect:      { state: 'connecting', attempt: 0, max: RECONNECT_DELAYS.length, delayMs: 0, reason: '' },
         log:            [{ kind: 'welcome', text: 'Connecting…' }],
         history:        [],
         timing:         false,
@@ -586,6 +753,23 @@ function App() {
   }, [paletteOpen, activeId, closeTab]);
 
   const activeTab = tabs.find(t => t.id === activeId) || null;
+  const sessionStatuses = aUseMemo(() => {
+    const out = {};
+    for (const tab of tabs) {
+      if (!tab.key) continue;
+      const reconnect = tab.reconnect;
+      const state = reconnect?.state || tab.connectionState || (tab.connected ? 'connected' : 'connecting');
+      if (state === 'connected' && !reconnect) continue;
+      out[tab.key] = {
+        state,
+        attempt: reconnect?.attempt || 0,
+        max: reconnect?.max || RECONNECT_DELAYS.length,
+        delayMs: reconnect?.delayMs || 0,
+        reason: reconnect?.reason || '',
+      };
+    }
+    return out;
+  }, [tabs]);
 
   return (
     <>
@@ -599,6 +783,7 @@ function App() {
           onCollapse={() => setSidebarHidden(true)}
           onOpenSession={openSession}
           highlightKey={activeTab ? activeTab.key : null}
+          sessionStatuses={sessionStatuses}
           onRefresh={loadContexts}
           hideEmptyNs={t.hideEmptyNs ?? true}
         />
@@ -620,6 +805,7 @@ function App() {
               <Session
                 tab={activeTab}
                 onUpdateTab={(patch) => updateTabWithClose(activeTab.id, patch)}
+                onReconnect={(reason) => reconnectSession(activeTab.id, reason)}
               />
             </>
           ) : (

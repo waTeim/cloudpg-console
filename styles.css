@@ -402,6 +402,11 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 .badge.ok { color: var(--ok); }
 .badge.warn { color: var(--warn); }
 .badge.err { color: var(--err); }
+.badge.session-status {
+  padding-inline: 4px;
+  font-size: 9.5px;
+  flex: none;
+}
 
 /* ---------- Main pane ---------- */
 .main {

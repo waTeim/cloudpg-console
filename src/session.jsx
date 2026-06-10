@@ -355,7 +355,7 @@ function ResultBlock({ result }) {
 }
 
 // ---------- The Session (one tab) ----------
-function Session({ tab, onUpdateTab }) {
+function Session({ tab, onUpdateTab, onReconnect }) {
   const [buffer, setBuffer] = sUseState("");
   const [hIdx, setHIdx] = sUseState(-1);     // history navigation index
   const [hStash, setHStash] = sUseState("");  // stash buffer when entering history nav
@@ -434,7 +434,46 @@ function Session({ tab, onUpdateTab }) {
 
     const t0 = Date.now();
     try {
-      const res = await window.cloudpg.pg.query(tab.id, sql);
+      let res = null;
+      for (let reconnects = 0; reconnects <= 2; reconnects++) {
+        window.pgUiDebug?.('query:send', {
+          id: tab.id,
+          key: tab.key,
+          reconnects,
+          sql: sql.replace(/\s+/g, ' ').slice(0, 120),
+        });
+        res = await window.cloudpg.pg.query(tab.id, sql);
+        window.pgUiDebug?.('query:response', {
+          id: tab.id,
+          key: tab.key,
+          reconnects,
+          error: res?.error || null,
+          disconnected: !!res?.disconnected,
+          retriable: !!res?.retriable,
+          command: res?.command || null,
+          rows: Array.isArray(res?.rows) ? res.rows.length : null,
+        });
+        if (!res?.retriable && !res?.disconnected) break;
+        window.pgUiDebug?.('query:needs-reconnect', {
+          id: tab.id,
+          key: tab.key,
+          reconnects,
+          error: res.error || 'connection lost',
+        });
+        const reconnect = onReconnect
+          ? await onReconnect(res.error || 'connection lost')
+          : { ok: false, error: res.error || 'connection lost' };
+        window.pgUiDebug?.('query:reconnect-result', {
+          id: tab.id,
+          key: tab.key,
+          reconnects,
+          ok: !!reconnect.ok,
+          error: reconnect.error || null,
+        });
+        if (!reconnect.ok) {
+          throw new Error(`connection lost; reconnect failed: ${reconnect.error || 'unknown error'}`);
+        }
+      }
       const ms  = (Date.now() - t0).toString();
 
       let result;
@@ -452,12 +491,20 @@ function Session({ tab, onUpdateTab }) {
         result = { kind: "command", message: "OK" };
       }
 
-      const newLog = [...logBefore, { kind: "result", result }];
-      if (tab.timing) newLog.push({ kind: "timing", ms });
-      onUpdateTab({ log: newLog });
+      onUpdateTab((current) => {
+        const newLog = [...(current.log || []), { kind: "result", result }];
+        if (current.timing) newLog.push({ kind: "timing", ms });
+        return { log: newLog };
+      });
     } catch (err) {
-      const newLog = [...logBefore, { kind: "result", result: { kind: "error", message: err.message } }];
-      onUpdateTab({ log: newLog });
+      window.pgUiDebug?.('query:failed', {
+        id: tab.id,
+        key: tab.key,
+        error: err.message || String(err),
+      });
+      onUpdateTab((current) => ({
+        log: [...(current.log || []), { kind: "result", result: { kind: "error", message: err.message } }],
+      }));
     }
   };
 

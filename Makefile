@@ -5,7 +5,7 @@
 # electron-builder, esbuild, react, the k8s + pg clients) installs
 # into node_modules.
 
-.PHONY: install build dev start package package-mac package-linux package-win clean distclean
+.PHONY: install build dev debug start package package-mac package-linux package-win clean distclean
 
 install:
 	npm install
@@ -17,6 +17,9 @@ build: install
 
 dev: build
 	npm run dev
+
+debug: build
+	npm run debug
 
 start: build
 	npm start

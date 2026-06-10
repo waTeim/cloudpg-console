@@ -8,6 +8,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --enable-logging",
+    "debug": "CLOUDPG_PG_DEBUG=1 electron . --enable-logging",
     "build": "node scripts/build.js",
     "package": "electron-builder",
     "package:mac": "electron-builder --mac",

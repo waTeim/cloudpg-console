@@ -7,6 +7,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('cloudpg', {
+  debug: {
+    pg: process.env.CLOUDPG_PG_DEBUG === '1',
+  },
   k8s: {
     listContexts:     ()                       => ipcRenderer.invoke('k8s:listContexts'),
     diagnose:         ()                       => ipcRenderer.invoke('k8s:diagnose'),
@@ -19,6 +22,7 @@ contextBridge.exposeInMainWorld('cloudpg', {
   pg: {
     connect:    (sessionId, opts) => ipcRenderer.invoke('pg:connect',    sessionId, opts),
     query:      (sessionId, sql)  => ipcRenderer.invoke('pg:query',      sessionId, sql),
+    status:     (sessionId)       => ipcRenderer.invoke('pg:status',     sessionId),
     disconnect: (sessionId)       => ipcRenderer.invoke('pg:disconnect', sessionId),
   },
 });
